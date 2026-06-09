@@ -33,17 +33,17 @@ STOCK_DICT = load_stock_dict()
 st.title("🏆 SEPA 核心持股 - 雙軌相對強度 (RS) 決策終端機")
 
 # 🌟 新增：馬克·米奈爾維尼 核心格言
-st.info("🔥 **「逆風不倒的韌性，就是下一波超級飆股的邀請函。」—— 馬克·米奈爾維尼 (Mark Minervini)**")
+st.info("🔥 「逆風不倒的韌性，就是下一波超級飆股的邀請函。」—— 馬克·米奈爾維尼 (Mark Minervini)")
 
 # 🌟 新增：SEPA 核心心法展開區塊
 with st.expander("📖 閱讀 SEPA 系統核心心法 (Trade Like a Stock Market Wizard)", expanded=True):
     st.markdown("""
-    大盤修正（Market Correction）或熊市，正是篩選**「下一波超級飆股（Next Superperformers）」**的黃金時間。當平庸的投資人因恐慌而遠離市場時，我們必須密切緊盯那些**「抗跌並拒絕下跌」**的個股，因為這正代表了機構法人正在瘋狂暗中吃貨。
+    大盤修正（Market Correction）或熊市，正是篩選「下一波超級飆股（Next Superperformers）」的黃金時間。當平庸的投資人因恐慌而遠離市場時，我們必須密切緊盯那些「抗跌並拒絕下跌」的個股，因為這正代表了機構法人正在瘋狂暗中吃貨。
 
-    **🎯 真正能創造數倍暴利的市場領導股（Market Leaders），通常具有以下三個特質：**
-    1. 在大盤中度修正時，它們**跌得最少**（甚至逆勢橫盤或創高）。
-    2. 在大盤觸底時，它們是**最先拔地而起、率先突破**的個股。
-    3. 大盤的跌勢，是在幫這些強勢股**清洗浮額（Weak hands）**，並讓其完美的 **VCP（波動率收縮型態）** 成型。
+    🎯 真正能創造數倍暴利的市場領導股（Market Leaders），通常具有以下三個特質：
+    1. 在大盤中度修正時，它們跌得最少（甚至逆勢橫盤或創高）。
+    2. 在大盤觸底時，它們是最先拔地而起、率先突破的個股。
+    3. 大盤的跌勢，是在幫這些強勢股清洗浮額（Weak hands），並讓其完美的 VCP（波動率收縮型態） 成型。
     """)
 
 st.markdown("""
@@ -72,60 +72,41 @@ with st.sidebar.form("sepa_integrated_form"):
     submit_btn = st.form_submit_button("🚀 執行雙軌交叉選股分析")
 
 def get_stocks_pool(text):
-    """智能防噪解析器 3.0：全面攔截國籍字串，並針對興櫃股/新股優化標籤"""
+    """全能解析器：同時支援代號提取與名稱模糊比對"""
     pool = []
-    mapping = {k.split('.')[0]: k for k in STOCK_DICT.keys()}
-    stock_pattern = re.compile(r'^[a-zA-Z0-9\.]+$')
     
-    # 🚫 常見網頁複製貼上的欄位殘留雜訊（直接名單排除，避免誤當成美股代號下載）
-    noise_words = {"TW", "TWD", "USD", "US", "HK", "HKD", "CN", "CNY", "未知"}
+    # 建立「名稱 -> 代號」的字典 (用於當使用者輸入名稱時的反查)
+    reverse_mapping = {v: k for k, v in STOCK_DICT.items()}
     
-    for line in text.strip().split('\n'):
+    for line in text.split('\n'):
         line = line.strip()
         if not line: continue
         
-        if ',' in line:
-            parts = line.split(',', 1)
-            token = parts[0].strip()
-            provided_name = parts[1].strip()
-        else:
-            token = line
-            provided_name = ""
-            
-        # 攔截純字母的國家或貨幣代碼雜訊
-        if token.upper() in noise_words:
-            continue
-            
-        is_valid = False
-        final_id = ""
-        final_name = ""
+        # 1. 嘗試提取「代號」 (4~6碼數字)
+        code_match = re.search(r'\b\d{4,6}\b', line)
         
-        # 1. 第一優先：檢查是否命中內建上市櫃字典
-        if token in STOCK_DICT:
-            final_id = token
-            final_name = provided_name if provided_name else STOCK_DICT[token]
-            is_valid = True
-        elif token in mapping:
-            final_id = mapping[token]
-            final_name = provided_name if provided_name else STOCK_DICT[final_id]
-            is_valid = True
+        if code_match:
+            code = code_match.group()
+            # 嘗試補上 .TW 或 .TWO，並確認是否存在於資料庫
+            found = False
+            for suffix in ["", ".TW", ".TWO"]:
+                target = f"{code}{suffix}" if suffix else code
+                if target in STOCK_DICT:
+                    pool.append({"id": target, "name": STOCK_DICT[target]})
+                    found = True
+                    break
+            if found: continue
             
-        # 2. 第二優先：如果是純數字（如輸入 6949 但忘記加副檔名的興櫃股或新上市股）
-        elif token.isdigit() and (4 <= len(token) <= 6):
-            final_id = f"{token}.TW"  # 自動補完副檔名
-            final_name = provided_name if provided_name else f"未知標的({token}.TW)"
-            is_valid = True
-            
-        # 3. 第三優先：格式正確的其他代號（如手動輸入 6949.TW 或海外標的）
-        elif stock_pattern.match(token) and 2 <= len(token) <= 12:
-            final_id = token
-            final_name = provided_name if provided_name else f"未知標的({token})"
-            is_valid = True
+        # 2. 如果沒有代號，或者代號查不到，嘗試「名稱比對」
+        # 我們會遍歷字典，看看這行文字是否包含其中一個股票名稱
+        for name, code in reverse_mapping.items():
+            if name in line:
+                pool.append({"id": code, "name": name})
+                break # 找到第一個符合的名稱就加入
                 
-        if is_valid:
-            pool.append({"id": final_id, "name": final_name})
-            
-    return pool
+    # 去除重複 (如果代號和名稱同時被解析到)
+    unique_pool = {item['id']: item for item in pool}.values()
+    return list(unique_pool)
 
 if 'first_run' not in st.session_state:
     st.session_state.first_run = True
