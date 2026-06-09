@@ -72,22 +72,19 @@ with st.sidebar.form("sepa_integrated_form"):
     submit_btn = st.form_submit_button("🚀 執行雙軌交叉選股分析")
 
 def get_stocks_pool(text):
-    """全能解析器：同時支援代號提取與名稱模糊比對"""
+    """智能掃描器：自動比對輸入文字與 STOCK_DICT 名稱"""
     pool = []
     
-    # 建立「名稱 -> 代號」的字典 (用於當使用者輸入名稱時的反查)
-    reverse_mapping = {v: k for k, v in STOCK_DICT.items()}
-    
+    # 將每一行切割處理
     for line in text.split('\n'):
         line = line.strip()
         if not line: continue
         
-        # 1. 嘗試提取「代號」 (4~6碼數字)
+        # 1. 第一優先：Regex 抓代號 (最準確)
         code_match = re.search(r'\b\d{4,6}\b', line)
-        
         if code_match:
             code = code_match.group()
-            # 嘗試補上 .TW 或 .TWO，並確認是否存在於資料庫
+            # 檢查 code 或 code.TW / code.TWO
             found = False
             for suffix in ["", ".TW", ".TWO"]:
                 target = f"{code}{suffix}" if suffix else code
@@ -96,17 +93,23 @@ def get_stocks_pool(text):
                     found = True
                     break
             if found: continue
+
+        # 2. 第二優先：掃描全資料庫進行「模糊匹配」
+        # 只要輸入的文字「包含」在正式名稱裡，就算抓到
+        found_name = False
+        for code, official_name in STOCK_DICT.items():
+            # 檢查：使用者的輸入是否在正式名稱中 (例如: 輸入 "金居" 在 "金居開發" 內)
+            if line in official_name or official_name in line:
+                pool.append({"id": code, "name": official_name})
+                found_name = True
+                break # 找到一個符合的就跳出
+        
+        if not found_name:
+            # 側邊欄提示哪些沒抓到，方便您除錯
+            st.sidebar.warning(f"⚠️ 找不到此標的: {line}")
             
-        # 2. 如果沒有代號，或者代號查不到，嘗試「名稱比對」
-        # 我們會遍歷字典，看看這行文字是否包含其中一個股票名稱
-        for name, code in reverse_mapping.items():
-            if name in line:
-                pool.append({"id": code, "name": name})
-                break # 找到第一個符合的名稱就加入
-                
-    # 去除重複 (如果代號和名稱同時被解析到)
-    unique_pool = {item['id']: item for item in pool}.values()
-    return list(unique_pool)
+    # 移除重複 (防止多種匹配結果)
+    return list({item['id']: item for item in pool}.values())
 
 if 'first_run' not in st.session_state:
     st.session_state.first_run = True
