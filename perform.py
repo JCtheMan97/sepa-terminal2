@@ -38,7 +38,7 @@ st.info("🔥 「逆風不倒的韌性，就是下一波超級飆股的邀請函
 # 🌟 新增：SEPA 核心心法展開區塊
 with st.expander("📖 閱讀 SEPA 系統核心心法 (Trade Like a Stock Market Wizard)", expanded=True):
     st.markdown("""
-    大盤修正（Market Correction）或熊市，正是篩選「下一波超級飆股（Next Superperformers）」的黃金時間。當平庸的投資人因恐慌而遠離市場時，我們必須密切緊盯那些「抗跌並拒絕下跌」的個股，因為這正代表了機構法人正在瘋狂暗中吃貨。
+    大盤修正（Market Correction）或熊市，正是篩選「下一波超級飆股（Next Superperformers）」的黃金時間。當平庸的投資人因恐慌而遠離市場時，我們必須密切緊盯那些「抗跌並拒絕下跌」的個股，裝這正代表了機構法人正在瘋狂暗中吃貨。
 
     🎯 真正能創造數倍暴利的市場領導股（Market Leaders），通常具有以下三個特質：
     1. 在大盤中度修正時，它們跌得最少（甚至逆勢橫盤或創高）。
@@ -176,22 +176,42 @@ if submit_btn or st.session_state.first_run:
                     outperform = np.sum(s_ret.reindex(panic_dates_list) > b_short_df.loc[panic_dates_list, 'Market_Return'])
                     resilience = (outperform / total_panic_days * 100) if total_panic_days > 0 else 100
                     
+                    # --- 新增：計算 50MA 與 乖離率 ---
+                    valid_s = s_series.dropna()
+                    if len(valid_s) >= 50:
+                        ma50_val = valid_s.rolling(window=50).mean().iloc[-1]
+                        price_now = valid_s.iloc[-1]
+                        bias_50 = ((price_now - ma50_val) / ma50_val) * 100
+                    else:
+                        bias_50 = 0.0 # 避免新股資料不足報錯
+                    
                     integrated_results.append({
                         "股票代號": ticker.split(".")[0], "股票名稱": stock["name"],
+                        "50MA乖離率(%)": bias_50,
                         "正宗 IBD 絕對分數": ibd, "對比 0050 超額強度": ibd - benchmark_ibd_score,
                         "短線抗跌韌性分數": resilience, "逆風勝率": f"{outperform} / {total_panic_days} 天",
                         "逆風上漲天數": f"{np.sum(s_ret.reindex(panic_dates_list) > 0)} 天"
                     })
                 
-                df_final = pd.DataFrame(integrated_results).sort_values("正宗 IBD 絕對分數", ascending=False)
+                # --- 修改：以「50MA乖離率」由低到高排序 ---
+                df_final = pd.DataFrame(integrated_results).sort_values("50MA乖離率(%)", ascending=True)
+                
+                # 🛠️ 核心改動：調整欄位順序，把「50MA乖離率(%)」放到最後面
+                cols = df_final.columns.tolist()
+                if "50MA乖離率(%)" in cols:
+                    cols.remove("50MA乖離率(%)")
+                    cols.append("50MA乖離率(%)")
+                df_final = df_final[cols]
                 
                 st.subheader(f"📊 雙軌數據交叉比對表 (大盤恐慌日：{total_panic_days} 天)")
                 st.info(f"💡 照妖鏡判定：{level_desc}。抗跌合格線：`{dynamic_threshold}%`")
                 
                 if skipped_stocks:
                     st.warning(f"⚠️ 以下輸入內容格式正確，但 yfinance 查無交易歷史數據（可能剛上市或打錯）：{', '.join(skipped_stocks)}")
-                    
+                
+                # --- 新增：將 50MA乖離率 顯示在主表格中 ---
                 st.dataframe(df_final, use_container_width=True, hide_index=True, column_config={
+                    "50MA乖離率(%)": st.column_config.NumberColumn("50MA乖離率", format="%.2f%%"),
                     "正宗 IBD 絕對分數": st.column_config.NumberColumn("IBD 絕對強度", format="%.1f"),
                     "短線抗跌韌性分數": st.column_config.ProgressColumn("抗跌得分", min_value=0, max_value=100, format="%.0f分")
                 })
@@ -199,16 +219,23 @@ if submit_btn or st.session_state.first_run:
                 # 四象限戰略部署
                 st.divider()
                 st.subheader("🏁 Mark Minervini 流派：雙軌交叉戰略部署")
+                st.caption("💡 註：括號內為 50MA 乖離率(%)。馬克心法：『不追高乖離，控好風險報酬比，專注基底與樞紐點突破。』")
                 true_leaders = df_final[(df_final["對比 0050 超額強度"] > 0) & (df_final["短線抗跌韌性分數"] >= dynamic_threshold)]
                 momentum_only = df_final[(df_final["對比 0050 超額強度"] > 0) & (df_final["短線抗跌韌性分數"] < dynamic_threshold)]
                 defensive_only = df_final[(df_final["對比 0050 超額強度"] <= 0) & (df_final["短線抗跌韌性分數"] >= dynamic_threshold)]
                 laggards = df_final[(df_final["對比 0050 超額強度"] <= 0) & (df_final["短線抗跌韌性分數"] < dynamic_threshold)]
                 
+                # --- 新增：自訂輸出格式函式，將股票名稱與 50MA乖離率 綁定在一起 ---
+                def format_stocks(df):
+                    if df.empty:
+                        return "無"
+                    return ', '.join([f"{row['股票名稱']} ({row['50MA乖離率(%)']:.1f}%)" for _, row in df.iterrows()])
+
                 c1, c2 = st.columns(2)
-                c1.success(f"### 👑 第一象限：逆風真龍頭 ({len(true_leaders)} 檔)"); c1.write(f"{', '.join(true_leaders['股票名稱'].tolist())}"); c1.caption("👉 戰略部署：長線動能擊敗大盤，且短線抗跌表現達到當前動態合格線以上。隨時注意 VCP 出量突破。")
-                c1.info(f"### 🚀 第二象限：高 Beta 攻擊兵 ({len(momentum_only)} 檔)"); c1.write(f"{', '.join(momentum_only['股票名稱'].tolist())}"); c1.caption("👉 戰略部署：長線極強，但修正波動高於大盤。一旦大盤止穩，這群股票往往是右側出量追擊的首選。")
-                c2.warning(f"### 🛡️ 第三象限：資金避風港 ({len(defensive_only)} 檔)"); c2.write(f"{', '.join(defensive_only['股票名稱'].tolist())}"); c2.caption("👉 戰略部署：短線極度抗跌，長線動能尚未完全追上。若有打底完成標的，高抗跌意味主力在低檔死守，值得關注！")
-                c2.error(f"### 🚨 第四象限：無情剔除名單 ({len(laggards)} 檔)"); c2.write(f"{', '.join(laggards['股票名稱'].tolist())}"); c2.caption("👉 戰略部署：長短線皆跑輸大盤，在馬克系統中完全沒有留戀價值，應盡快抽回資金。")
+                c1.success(f"### 👑 第一象限：逆風真龍頭 ({len(true_leaders)} 檔)"); c1.write(format_stocks(true_leaders)); c1.caption("👉 戰略部署：長線動能擊敗大盤，且短線抗跌表現達到當前動態合格線以上。隨時注意 VCP 出量突破。")
+                c1.info(f"### 🚀 第二象限：高 Beta 攻擊兵 ({len(momentum_only)} 檔)"); c1.write(format_stocks(momentum_only)); c1.caption("👉 戰略部署：長線極強，但修正波動高於大盤。一旦大盤止穩，這群股票往往是右側出量追擊的首選。")
+                c2.warning(f"### 🛡️ 第三象限：資金避風港 ({len(defensive_only)} 檔)"); c2.write(format_stocks(defensive_only)); c2.caption("👉 戰略部署：短線極度抗跌，長線動能尚未完全追上。若有打底完成標的，高抗跌意味主力在低檔死守，值得關注！")
+                c2.error(f"### 🚨 第四象限：無情剔除名單 ({len(laggards)} 檔)"); c2.write(format_stocks(laggards)); c2.caption("👉 戰略部署：長短線皆跑輸大盤，在馬克系統中完全沒有留戀價值，應盡快抽回資金。")
                 
         except Exception as e:
             st.error(f"數據錯誤: {e}")
