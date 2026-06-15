@@ -38,7 +38,7 @@ st.info("🔥 「逆風不倒的韌性，就是下一波超級飆股的邀請函
 # 🌟 新增：SEPA 核心心法展開區塊
 with st.expander("📖 閱讀 SEPA 系統核心心法 (Trade Like a Stock Market Wizard)", expanded=True):
     st.markdown("""
-    大盤修正（Market Correction）或熊市，正是篩選「下一波超級飆股（Next Superperformers）」的黃金時間。當平庸的投資人因恐慌而遠離市場時，我們必須密切緊盯那些「抗跌並拒絕下跌」的個股，裝這正代表了機構法人正在瘋狂暗中吃貨。
+    大盤修正（Market Correction）或熊市，正是篩選「下一波超級飆股（Next Superperformers）」的黃金時間。當平庸的投資人因恐慌而遠離市場時，我們必須密切緊盯那些「抗跌並拒絕下跌」的個股，因為這正代表了機構法人正在瘋狂暗中吃貨。
 
     🎯 真正能創造數倍暴利的市場領導股（Market Leaders），通常具有以下三個特質：
     1. 在大盤中度修正時，它們跌得最少（甚至逆勢橫盤或創高）。
