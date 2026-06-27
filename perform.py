@@ -211,9 +211,67 @@ if submit_btn or st.session_state.first_run:
                         is_trend_template = cond1 and cond2 and cond3 and cond4 and cond5 and cond6 and cond7
                     else:
                         is_trend_template = False
+                        p_now = valid_s.iloc[-1] if not valid_s.empty else np.nan
+
+                    # ==========================================
+                    # 💡 【核心整合】原第 11 欄：VCP 與 動能狀態判定 💡
+                    # ==========================================
+                    is_price_new_high = False
+                    is_alpha_new_high = False
+                    is_alpha_lagging = False
+                    is_vcp_80 = False
+                    is_vcp_90 = False
+                    is_rs_recovering = False
                     
-                    # 依據判定結果在股票名稱前標記 ✅ 或 ❌
-                    display_name = f"✅ {stock['name']}" if is_trend_template else f"❌ {stock['name']}"
+                    if len(valid_s) >= 30:
+                        # 建立對比 0050 的相對強度曲線 (Alpha RS 原理)
+                        same_idx_b = b_c.reindex(valid_s.index).ffill()
+                        rel_close = valid_s / same_idx_b
+                        
+                        # 雙軌領先/背離偵測 (以30日為基準軸)
+                        is_price_new_high = p_now >= valid_s.iloc[-31:-1].max()
+                        is_alpha_new_high = rel_close.iloc[-1] >= rel_close.iloc[-31:-1].max()
+                        is_alpha_lagging = rel_close.iloc[-1] < rel_close.iloc[-31:-1].max()
+                        
+                        # 短線動能回復 (Relative RS 連續3日走揚)
+                        if len(rel_close) >= 3:
+                            is_rs_recovering = rel_close.iloc[-1] > rel_close.iloc[-2] and rel_close.iloc[-2] > rel_close.iloc[-3]
+                        
+                        # VCP 緊縮指標量化計算 (5日價格波動度 / 20日均值)
+                        roll_std5 = valid_s.rolling(5).std()
+                        roll_mean5 = valid_s.rolling(5).mean()
+                        cv_5 = roll_std5 / roll_mean5
+                        if len(cv_5) >= 20:
+                            cv_5_ma20 = cv_5.rolling(20).mean()
+                            cv_5_now = cv_5.iloc[-1]
+                            cv_5_ma20_now = cv_5_ma20.iloc[-1]
+                            is_vcp_80 = cv_5_now < cv_5_ma20_now * 0.80
+                            is_vcp_90 = cv_5_now < cv_5_ma20_now * 0.90
+                    
+                    is_rs_leading = (not is_price_new_high) and is_alpha_new_high
+                    is_div_warning = is_price_new_high and is_alpha_lagging
+                    
+                    # 結構特徵分配
+                    if is_vcp_80:
+                        struct_status = "💎 極致壓縮(80%+CV)"
+                    elif is_vcp_90:
+                        struct_status = "🔥 相對壓縮(90%+CV)"
+                    elif is_rs_recovering:
+                        struct_status = "📈 動能回復中"
+                    else:
+                        struct_status = "⏳ 區間整理"
+                        
+                    # 領先與背離狀態首碼
+                    lead_prefix = ""
+                    if is_rs_leading:
+                        lead_prefix = "🌟 雙軌領先 | "
+                    elif is_div_warning:
+                        lead_prefix = "⚠️ 雙軌背離 | "
+                        
+                    vcp_status_final = lead_prefix + struct_status
+                    
+                    # 依據判定結果在股票名稱前標記 ✅ 或 ❌，並在後方結合 VCP/動能 綜合狀態字串
+                    display_name = f"✅ {stock['name']} 【{vcp_status_final}】" if is_trend_template else f"❌ {stock['name']} 【{vcp_status_final}】"
                     
                     integrated_results.append({
                         "股票代號": ticker.split(".")[0], "股票名稱": display_name,
@@ -236,20 +294,28 @@ if submit_btn or st.session_state.first_run:
                 st.subheader(f"📊 雙軌數據交叉比對表 (大盤恐慌日：{total_panic_days} 天)")
                 st.info(f"💡 照妖鏡判定：{level_desc}。抗跌合格線：`{dynamic_threshold}%`")
                 
-                # 🌟 新增：符號意義說明區塊 (是否符合馬克選股模板)
+                # 🌟 新增：符號意義說明區塊 (是否符合馬克選股模板 + VCP 狀態註解)
                 with st.expander("🔍 符號意義與馬克趨勢模板 (Trend Template) 說明", expanded=False):
                     st.markdown("""
-                    * **✅ 符合標記**：代表該股目前完全符合馬克·米奈爾維尼（Mark Minervini）的 **7 大趨勢模板核心條件**，正處於健康的**第二階段（Stage 2）上升趨勢**。
-                    * **❌ 未符標記**：代表該股目前未全數滿足 7 項技術面排列準則（可能均線結構仍待修復，或距 52 週高低點比例未達標）。
+                    * ✅ 符合標記：代表該股目前完全符合馬克·米奈爾維尼（Mark Minervini）的 7 大趨勢模板核心條件，正處於健康的第二階段（Stage 2）上升趨勢。
+                    * ❌ 未符標記：代表該股目前未全數滿足 7 項技術面排列準則（可能均線結構仍待修復，或距 52 週高低點比例未達標）。
                     
-                    **📝 馬克選股 7 大趨勢模板核心準則：**
-                    1. **現價 > 150MA** 且 **現價 > 200MA**（股價站長線均線之上）
-                    2. **150MA > 200MA**（長線均線維持多頭排列）
-                    3. **200MA 處於上升趨勢**（至少上揚 1 個月，此系統比對 22 天前數據）
-                    4. **50MA > 150MA** 且 **50MA > 200MA**（中期均線多頭黃金交叉）
-                    5. **現價 > 50MA**（股價站穩中期生命線）
-                    6. **現價較過去 52 週最低點高出至少 25%**（展現強勁築底反彈力道）
-                    7. **現價距離過去 52 週最高點在 25% 以內**（高檔強勢整理，伺機向上突破樞紐點）
+                    🌀 **VCP / 動能狀態動態標籤說明：**
+                    * **🌟 雙軌領先**：個股股價尚未突破30日新高，但相對強度 (Alpha RS 曲線) 已率先刷新30日紀錄，暗示機構暗中強勢吃貨，極具爆發力。
+                    * **⚠️ 雙軌背離**：股價已創30日新高，但相對強度未同步創高，短線動能呈現隱形落後，需警惕高檔假突破。
+                    * **💎 極致壓縮(80%+CV)**：5日價格變異係數收縮至20日均值的 80% 以下，籌碼極度洗淨，多空面臨臨界點。
+                    * **🔥 相對壓縮(90%+CV)**：5日價格變異係數收縮至20日均值的 90% 以下，進入標準 VCP 波幅收緊軌道。
+                    * **📈 動能回復中**：短線相對強度曲線扭轉下行趨勢、連續 3 日走揚，代表短期動能正由弱轉強。
+                    * **⏳ 區間整理**：股價與動能處於正常箱型、橫盤或洗盤沉澱階段，未出現極端信號。
+                    
+                    📝 **馬克選股 7 大趨勢模板核心準則：**
+                    1. 現價 > 150MA 且 現價 > 200MA（股價站長線均線之上）
+                    2. 150MA > 200MA（長線均線維持多頭排列）
+                    3. 200MA 處於上升趨勢（至少上揚 1 個月，此系統比對 22 天前數據）
+                    4. 50MA > 150MA 且 50MA > 200MA（中期均線多頭黃金交叉）
+                    5. 現價 > 50MA（股價站穩中期生命線）
+                    6. 現價較過去 52 週最低點高出至少 25%（展現強勁築底反彈力道）
+                    7. 現價距離過去 52 週最高點在 25% 以內（高檔強勢整理，伺機向上突破樞紐點）
                     """)
                 
                 if skipped_stocks:
