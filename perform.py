@@ -43,7 +43,7 @@ with st.expander("📖 閱讀 SEPA 系統核心心法 (Trade Like a Stock Market
     🎯 真正能創造數倍暴利的市場領導股（Market Leaders），通常具有以下三個特質：
     1. 在大盤中度修正時，它們跌得最少（甚至逆勢橫盤或創高）。
     2. 在大盤觸底時，它們是最先拔地而起、率先突破的個股。
-    3. 大盤的跌勢，是在幫這些強勢股清洗浮額（Weak hands），並讓其完美的 VCP（波動率收縮型態） 成型。
+    3. 大盤的跌勢，是在幫 these 強勢股清洗浮額（Weak hands），並讓其完美的 VCP（波動率收縮型態） 成型。
     """)
 
 st.markdown("""
@@ -185,8 +185,38 @@ if submit_btn or st.session_state.first_run:
                     else:
                         bias_50 = 0.0 # 避免新股資料不足報錯
                     
+                    # 🛡️ 轉譯：計算馬克 7 大趨勢模板核心條件
+                    if len(valid_s) >= 200:
+                        sma50_s = valid_s.rolling(50).mean()
+                        sma150_s = valid_s.rolling(150).mean()
+                        sma200_s = valid_s.rolling(200).mean()
+                        
+                        p_now = valid_s.iloc[-1]
+                        m50 = sma50_s.iloc[-1]
+                        m150 = sma150_s.iloc[-1]
+                        m200 = sma200_s.iloc[-1]
+                        m200_22 = sma200_s.shift(22).iloc[-1] if len(sma200_s) > 22 else np.nan
+                        
+                        h252 = valid_s.rolling(252, min_periods=1).max().iloc[-1]
+                        l252 = valid_s.rolling(252, min_periods=1).min().iloc[-1]
+                        
+                        cond1 = (p_now > m150) and (p_now > m200)
+                        cond2 = m150 > m200
+                        cond3 = (m200 > m200_22) if not pd.isna(m200_22) else False
+                        cond4 = (m50 > m150) and (m50 > m200)
+                        cond5 = p_now > m50
+                        cond6 = ((p_now / l252) - 1) * 100 >= 25 if l252 > 0 else False
+                        cond7 = (1 - (p_now / h252)) * 100 <= 25 if h252 > 0 else False
+                        
+                        is_trend_template = cond1 and cond2 and cond3 and cond4 and cond5 and cond6 and cond7
+                    else:
+                        is_trend_template = False
+                    
+                    # 依據判定結果在股票名稱前標記 ✅ 或 ❌
+                    display_name = f"✅ {stock['name']}" if is_trend_template else f"❌ {stock['name']}"
+                    
                     integrated_results.append({
-                        "股票代號": ticker.split(".")[0], "股票名稱": stock["name"],
+                        "股票代號": ticker.split(".")[0], "股票名稱": display_name,
                         "50MA乖離率(%)": bias_50,
                         "正宗 IBD 絕對分數": ibd, "對比 0050 超額強度": ibd - benchmark_ibd_score,
                         "短線抗跌韌性分數": resilience, "逆風勝率": f"{outperform} / {total_panic_days} 天",
@@ -205,6 +235,22 @@ if submit_btn or st.session_state.first_run:
                 
                 st.subheader(f"📊 雙軌數據交叉比對表 (大盤恐慌日：{total_panic_days} 天)")
                 st.info(f"💡 照妖鏡判定：{level_desc}。抗跌合格線：`{dynamic_threshold}%`")
+                
+                # 🌟 新增：符號意義說明區塊 (是否符合馬克選股模板)
+                with st.expander("🔍 符號意義與馬克趨勢模板 (Trend Template) 說明", expanded=False):
+                    st.markdown("""
+                    * **✅ 符合標記**：代表該股目前完全符合馬克·米奈爾維尼（Mark Minervini）的 **7 大趨勢模板核心條件**，正處於健康的**第二階段（Stage 2）上升趨勢**。
+                    * **❌ 未符標記**：代表該股目前未全數滿足 7 項技術面排列準則（可能均線結構仍待修復，或距 52 週高低點比例未達標）。
+                    
+                    **📝 馬克選股 7 大趨勢模板核心準則：**
+                    1. **現價 > 150MA** 且 **現價 > 200MA**（股價站長線均線之上）
+                    2. **150MA > 200MA**（長線均線維持多頭排列）
+                    3. **200MA 處於上升趨勢**（至少上揚 1 個月，此系統比對 22 天前數據）
+                    4. **50MA > 150MA** 且 **50MA > 200MA**（中期均線多頭黃金交叉）
+                    5. **現價 > 50MA**（股價站穩中期生命線）
+                    6. **現價較過去 52 週最低點高出至少 25%**（展現強勁築底反彈力道）
+                    7. **現價距離過去 52 週最高點在 25% 以內**（高檔強勢整理，伺機向上突破樞紐點）
+                    """)
                 
                 if skipped_stocks:
                     st.warning(f"⚠️ 以下輸入內容格式正確，但 yfinance 查無交易歷史數據（可能剛上市或打錯）：{', '.join(skipped_stocks)}")
