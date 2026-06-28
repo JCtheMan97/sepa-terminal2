@@ -29,6 +29,13 @@ def load_stock_dict():
 
 STOCK_DICT = load_stock_dict()
 
+# --- 🎯 快取下載與運算引擎 ---
+@st.cache_data(ttl=3600)  # 快取1小時，避免重複請求
+def fetch_and_sync_data(tickers, start_date, end_date):
+    """將 yfinance 下載與基本資料同步邏輯獨立並進行快取"""
+    df_all = yf.download(tickers, start=start_date, end=end_date, progress=False, auto_adjust=False)
+    return df_all
+
 # --- 🎯 網頁標題與馬克心法區塊 ---
 st.title("🏆 SEPA 核心持股 - 雙軌相對強度 (RS) 決策終端機")
 
@@ -128,7 +135,9 @@ if submit_btn or st.session_state.first_run:
                 st.error("❌ 過濾雜訊後，未偵測到任何有效的股票代號，請重新輸入。")
             else:
                 all_tickers = ["0050.TW"] + [stock["id"] for stock in STOCKS_POOL]
-                df_all = yf.download(all_tickers, start=start_date_long, end=end_date, progress=False, auto_adjust=False)
+                
+                # 使用 Cache 載入/緩存歷史資料
+                df_all = fetch_and_sync_data(tuple(all_tickers), start_date_long.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
                 
                 df_adj = df_all['Adj Close'] if 'Adj Close' in df_all.columns.levels[0] else df_all['Close']
                 b_c = df_adj["0050.TW"].dropna()
@@ -281,8 +290,8 @@ if submit_btn or st.session_state.first_run:
                         "逆風上漲天數": f"{np.sum(s_ret.reindex(panic_dates_list) > 0)} 天"
                     })
                 
-                # --- 修改：以「50MA乖離率」由低到高排序 ---
-                df_final = pd.DataFrame(integrated_results).sort_values("50MA乖離率(%)", ascending=True)
+                # --- 修改：核心排序邏輯變更為「對比 0050 超額強度」由高到低（ascending=False） ---
+                df_final = pd.DataFrame(integrated_results).sort_values("對比 0050 超額強度", ascending=False)
                 
                 # 🛠️ 核心改動：調整欄位順序，把「50MA乖離率(%)」放到最後面
                 cols = df_final.columns.tolist()
@@ -345,7 +354,7 @@ if submit_btn or st.session_state.first_run:
 
                 c1, c2 = st.columns(2)
                 c1.success(f"### 👑 第一象限：逆風真龍頭 ({len(true_leaders)} 檔)"); c1.write(format_stocks(true_leaders)); c1.caption("👉 戰略部署：長線動能擊敗大盤，且短線抗跌表現達到當前動態合格線以上。隨時注意 VCP 出量突破。")
-                c1.info(f"### 🚀 第二象限：高 Beta 攻擊兵 ({len(momentum_only)} 檔)"); c1.write(format_stocks(momentum_only)); c1.caption("👉 戰略部署：長線極強，但修正波動高於大盤。一旦大盤止穩，這群股票往往是右側出量追擊的首選。")
+                c1.info(f"### 🚀 第二象限：高 Beta 攻擊兵 ({len(momentum_only)} 檔)"); c1.write(format_stocks(momentum_only)); c1.caption("👉 戰略部署：長線極強，但修正波動高於大盤. 一旦大盤止穩，這群股票往往是右側出量追擊的首選。")
                 c2.warning(f"### 🛡️ 第三象限：資金避風港 ({len(defensive_only)} 檔)"); c2.write(format_stocks(defensive_only)); c2.caption("👉 戰略部署：短線極度抗跌，長線動能尚未完全追上。若有打底完成標的，高抗跌意味主力在低檔死守，值得關注！")
                 c2.error(f"### 🚨 第四象限：無情剔除名單 ({len(laggards)} 檔)"); c2.write(format_stocks(laggards)); c2.caption("👉 戰略部署：長短線皆跑輸大盤，在馬克系統中完全沒有留戀價值，應盡快抽回資金。")
                 
