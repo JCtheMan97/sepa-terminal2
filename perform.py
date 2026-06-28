@@ -37,7 +37,7 @@ def fetch_and_sync_data(tickers, start_date, end_date):
     return df_all
 
 # --- 🎯 網頁標題與馬克心法區塊 ---
-st.title("🏆 SEPA 核心持股 - 雙軌相對強度 (RS) 決策終端機")
+st.title("🏆 SEPA 技術面篩選模組 - 雙軌相對強度 (RS) 決策終端機")
 
 # 🌟 新增：馬克·米奈爾維尼 核心格言
 st.info("🔥 「逆風不倒的韌性，就是下一波超級飆股的邀請函。」—— 馬克·米奈爾維尼 (Mark Minervini)")
@@ -55,7 +55,7 @@ with st.expander("📖 閱讀 SEPA 系統核心心法 (Trade Like a Stock Market
 
 st.markdown("""
 ---
-本系統完美融合 正宗 IBD 長線動能指標 與 短線逆風防守照妖鏡：
+本系統完美融合 IBD式 長線動能指標 與 短線逆風防守照妖鏡：
 * 📈 長線動能：採用經典 Pine Script 權重公式 (`3M*2 + 6M + 9M + 12M`)，並以 元大台灣50 (0050) 為比較基準。
 * 🔍 短線抗跌：系統將根據大盤回檔天數，動態計算抗跌合格門檻，完美避開極短線的分母效應。
 """)
@@ -285,7 +285,7 @@ if submit_btn or st.session_state.first_run:
                     integrated_results.append({
                         "股票代號": ticker.split(".")[0], "股票名稱": display_name,
                         "50MA乖離率(%)": bias_50,
-                        "正宗 IBD 絕對分數": ibd, "對比 0050 超額強度": ibd - benchmark_ibd_score,
+                        "IBD式 絕對分數": ibd, "對比 0050 超額強度": ibd - benchmark_ibd_score,
                         "短線抗跌韌性分數": resilience, "逆風勝率": f"{outperform} / {total_panic_days} 天",
                         "逆風上漲天數": f"{np.sum(s_ret.reindex(panic_dates_list) > 0)} 天"
                     })
@@ -333,7 +333,7 @@ if submit_btn or st.session_state.first_run:
                 # --- 新增：將 50MA乖離率 顯示在主表格中 ---
                 st.dataframe(df_final, use_container_width=True, hide_index=True, column_config={
                     "50MA乖離率(%)": st.column_config.NumberColumn("50MA乖離率", format="%.2f%%"),
-                    "正宗 IBD 絕對分數": st.column_config.NumberColumn("IBD 絕對強度", format="%.1f"),
+                    "IBD式 絕對分數": st.column_config.NumberColumn("IBD式 絕對強度", format="%.1f"),
                     "短線抗跌韌性分數": st.column_config.ProgressColumn("抗跌得分", min_value=0, max_value=100, format="%.0f分")
                 })
                 
@@ -356,7 +356,7 @@ if submit_btn or st.session_state.first_run:
                 c1.success(f"### 👑 第一象限：逆風真龍頭 ({len(true_leaders)} 檔)"); c1.write(format_stocks(true_leaders)); c1.caption("👉 戰略部署：長線動能擊敗大盤，且短線抗跌表現達到當前動態合格線以上。隨時注意 VCP 出量突破。")
                 c1.info(f"### 🚀 第二象限：高 Beta 攻擊兵 ({len(momentum_only)} 檔)"); c1.write(format_stocks(momentum_only)); c1.caption("👉 戰略部署：長線極強，但修正波動高於大盤. 一旦大盤止穩，這群股票往往是右側出量追擊的首選。")
                 c2.warning(f"### 🛡️ 第三象限：資金避風港 ({len(defensive_only)} 檔)"); c2.write(format_stocks(defensive_only)); c2.caption("👉 戰略部署：短線極度抗跌，長線動能尚未完全追上。若有打底完成標的，高抗跌意味主力在低檔死守，值得關注！")
-                c2.error(f"### 🚨 第四象限：無情剔除名單 ({len(laggards)} 檔)"); c2.write(format_stocks(laggards)); c2.caption("👉 戰略部署：長短線皆跑輸大盤，在馬克系統中完全沒有留戀價值，應盡快抽回資金。")
+                c2.error(f"### 🚨 第四象限：無情剔除名單 ({len(laggards)} 檔)"); c2.write(format_stocks(laggards)); c2.caption("👉 戰略部署：長短線皆跑輸大盤，在馬克系統中屬於弱勢標的，建議審慎評估資金配置與汰弱留強。")
                 
         except Exception as e:
             st.error(f"數據錯誤: {e}")
