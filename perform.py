@@ -76,6 +76,13 @@ with st.sidebar.form("sepa_integrated_form"):
     lookback_days = st.number_input("自訂照妖鏡觀察天數", min_value=5, max_value=365, value=60, step=1)
     market_threshold = st.slider("大盤恐慌日定義 (單日跌幅 %)", min_value=0.5, max_value=2.5, value=1.0, step=0.1)
     
+    # ==========================================
+    # 🆕 新增功能：回溯時間軸與績效回測
+    # ==========================================
+    st.subheader("【🕒 歷史回溯與績效回測】")
+    backtest_date = st.date_input("選擇回溯基準日 (以此日視為當時的今天)", value=datetime.today())
+    is_backtesting = backtest_date < datetime.today().date()
+    
     submit_btn = st.form_submit_button("🚀 執行雙軌交叉選股分析")
 
 def get_stocks_pool(text):
@@ -125,7 +132,10 @@ if submit_btn or st.session_state.first_run:
     STOCKS_POOL = get_stocks_pool(stock_input)
     st.session_state.first_run = False
     
-    end_date = datetime.today()
+    # 核心改動：將原本的 end_date 錨定在使用者選擇的 backtest_date
+    end_date = datetime.combine(backtest_date, datetime.min.time())
+    real_today = datetime.today() # 真正的今天，用來計算回測報酬率
+    
     start_date_long = end_date - timedelta(days=550) 
     start_date_short = end_date - timedelta(days=int(lookback_days))
     
@@ -136,227 +146,267 @@ if submit_btn or st.session_state.first_run:
             else:
                 all_tickers = ["0050.TW"] + [stock["id"] for stock in STOCKS_POOL]
                 
-                # 使用 Cache 載入/緩存歷史資料
-                df_all = fetch_and_sync_data(tuple(all_tickers), start_date_long.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
+                # 核心改動：為了計算後續績效，下載範圍必須延伸到真正的今日 (real_today)
+                df_all = fetch_and_sync_data(tuple(all_tickers), start_date_long.strftime('%Y-%m-%d'), real_today.strftime('%Y-%m-%d'))
                 
                 df_adj = df_all['Adj Close'] if 'Adj Close' in df_all.columns.levels[0] else df_all['Close']
-                b_c = df_adj["0050.TW"].dropna()
                 
-                # 大盤基準線
-                idx_now, idx_3m, idx_6m, idx_9m, idx_1y = b_c.index[-1], b_c.index[-63], b_c.index[-126], b_c.index[-189], b_c.index[-252]
-                b_now, b_3m, b_6m, b_9m, b_1y = b_c.loc[idx_now], b_c.loc[idx_3m], b_c.loc[idx_6m], b_c.loc[idx_9m], b_c.loc[idx_1y]
-                benchmark_ibd_score = ((b_now/b_3m*2) + (b_now/b_6m) + (b_now/b_9m) + (b_now/b_1y)) / 5 * 100
+                # 這裡過濾出回溯基準日前的歷史大盤數據，用作當時篩選的基準線
+                b_c_all = df_adj["0050.TW"].dropna()
+                b_c = b_c_all.loc[:end_date.strftime('%Y-%m-%d')]
                 
-                # 短線照妖鏡
-                b_short_df = pd.DataFrame(b_c.loc[start_date_short.strftime('%Y-%m-%d'):])
-                b_short_df.columns = ['Close_Price']
-                b_short_df['Market_Return'] = b_short_df['Close_Price'].pct_change() * 100
-                panic_days = b_short_df[b_short_df['Market_Return'] <= -market_threshold]
-                total_panic_days = len(panic_days)
-                panic_dates_list = panic_days.index.tolist()
-                
-                dynamic_threshold = 55.0 if total_panic_days <= 5 else (70.0 if total_panic_days <= 15 else 80.0)
-                level_desc = "⚡ 極短線回檔（採取寬鬆防守標準，勝率過半即合格）" if total_panic_days <= 5 else ("⚖️ 標準波段修正（採取黃金 70% 機構防守標準）" if total_panic_days <= 15 else "🚨 空頭大屠殺 / 系統性風險（採取極嚴苛 80% 沙裡淘金標準）")
-                
-                integrated_results = []
-                skipped_stocks = []
-                
-                for stock in STOCKS_POOL:
-                    ticker = stock["id"]
+                if b_c.empty:
+                    st.error("❌ 回溯基準日無交易數據或超出歷史範圍，請重新選擇。")
+                else:
+                    # 大盤基準線
+                    idx_now, idx_3m, idx_6m, idx_9m, idx_1y = b_c.index[-1], b_c.index[-63], b_c.index[-126], b_c.index[-189], b_c.index[-252]
+                    b_now, b_3m, b_6m, b_9m, b_1y = b_c.loc[idx_now], b_c.loc[idx_3m], b_c.loc[idx_6m], b_c.loc[idx_9m], b_c.loc[idx_1y]
+                    benchmark_ibd_score = ((b_now/b_3m*2) + (b_now/b_6m) + (b_now/b_9m) + (b_now/b_1y)) / 5 * 100
                     
-                    if ticker not in df_adj.columns:
-                        skipped_stocks.append(stock["name"])
-                        continue
+                    # 短線照妖鏡
+                    b_short_df = pd.DataFrame(b_c.loc[start_date_short.strftime('%Y-%m-%d'):])
+                    b_short_df.columns = ['Close_Price']
+                    b_short_df['Market_Return'] = b_short_df['Close_Price'].pct_change() * 100
+                    panic_days = b_short_df[b_short_df['Market_Return'] <= -market_threshold]
+                    total_panic_days = len(panic_days)
+                    panic_dates_list = panic_days.index.tolist()
                     
-                    s_series = df_adj[ticker].reindex(b_c.index)
+                    dynamic_threshold = 55.0 if total_panic_days <= 5 else (70.0 if total_panic_days <= 15 else 80.0)
+                    level_desc = "⚡ 極短線回檔（採取寬鬆防守標準，勝率過半即合格）" if total_panic_days <= 5 else ("⚖️ 標準波段修正（採取黃金 70% 機構防守標準）" if total_panic_days <= 15 else "🚨 空頭大屠殺 / 系統性風險（採取極嚴苛 80% 沙裡淘金標準）")
                     
-                    if s_series.dropna().empty:
-                        skipped_stocks.append(stock["name"])
-                        continue
+                    integrated_results = []
+                    skipped_stocks = []
                     
-                    def get_v(s, idx): 
-                        valid = s.dropna()
-                        return valid.loc[valid.index[np.argmin(np.abs(valid.index - idx))]]
-                    
-                    s_n, s_3, s_6, s_9, s_1 = get_v(s_series, idx_now), get_v(s_series, idx_3m), get_v(s_series, idx_6m), get_v(s_series, idx_9m), get_v(s_series, idx_1y)
-                    ibd = ((s_n/s_3*2) + (s_n/s_6) + (s_n/s_9) + (s_n/s_1)) / 5 * 100
-                    
-                    s_ret = s_series.pct_change() * 100
-                    outperform = np.sum(s_ret.reindex(panic_dates_list) > b_short_df.loc[panic_dates_list, 'Market_Return'])
-                    resilience = (outperform / total_panic_days * 100) if total_panic_days > 0 else 100
-                    
-                    # --- 新增：計算 50MA 與 乖離率 ---
-                    valid_s = s_series.dropna()
-                    if len(valid_s) >= 50:
-                        ma50_val = valid_s.rolling(window=50).mean().iloc[-1]
-                        price_now = valid_s.iloc[-1]
-                        bias_50 = ((price_now - ma50_val) / ma50_val) * 100
-                    else:
-                        bias_50 = 0.0 # 避免新股資料不足報錯
-                    
-                    # 🛡️ 轉譯：計算馬克 7 大趨勢模板核心條件
-                    if len(valid_s) >= 200:
-                        sma50_s = valid_s.rolling(50).mean()
-                        sma150_s = valid_s.rolling(150).mean()
-                        sma200_s = valid_s.rolling(200).mean()
+                    for stock in STOCKS_POOL:
+                        ticker = stock["id"]
                         
-                        p_now = valid_s.iloc[-1]
-                        m50 = sma50_s.iloc[-1]
-                        m150 = sma150_s.iloc[-1]
-                        m200 = sma200_s.iloc[-1]
-                        m200_22 = sma200_s.shift(22).iloc[-1] if len(sma200_s) > 22 else np.nan
+                        if ticker not in df_adj.columns:
+                            skipped_stocks.append(stock["name"])
+                            continue
                         
-                        h252 = valid_s.rolling(252, min_periods=1).max().iloc[-1]
-                        l252 = valid_s.rolling(252, min_periods=1).min().iloc[-1]
+                        # 完整歷史序列與回溯基準日前歷史序列
+                        s_series_all = df_adj[ticker].reindex(b_c_all.index)
+                        s_series = s_series_all.loc[:end_date.strftime('%Y-%m-%d')]
                         
-                        cond1 = (p_now > m150) and (p_now > m200)
-                        cond2 = m150 > m200
-                        cond3 = (m200 > m200_22) if not pd.isna(m200_22) else False
-                        cond4 = (m50 > m150) and (m50 > m200)
-                        cond5 = p_now > m50
-                        cond6 = ((p_now / l252) - 1) * 100 >= 25 if l252 > 0 else False
-                        cond7 = (1 - (p_now / h252)) * 100 <= 25 if h252 > 0 else False
+                        if s_series.dropna().empty:
+                            skipped_stocks.append(stock["name"])
+                            continue
                         
-                        is_trend_template = cond1 and cond2 and cond3 and cond4 and cond5 and cond6 and cond7
-                    else:
-                        is_trend_template = False
-                        p_now = valid_s.iloc[-1] if not valid_s.empty else np.nan
+                        def get_v(s, idx): 
+                            valid = s.dropna()
+                            return valid.loc[valid.index[np.argmin(np.abs(valid.index - idx))]]
+                        
+                        s_n, s_3, s_6, s_9, s_1 = get_v(s_series, idx_now), get_v(s_series, idx_3m), get_v(s_series, idx_6m), get_v(s_series, idx_9m), get_v(s_series, idx_1y)
+                        ibd = ((s_n/s_3*2) + (s_n/s_6) + (s_n/s_9) + (s_n/s_1)) / 5 * 100
+                        
+                        s_ret = s_series.pct_change() * 100
+                        outperform = np.sum(s_ret.reindex(panic_dates_list) > b_short_df.loc[panic_dates_list, 'Market_Return'])
+                        resilience = (outperform / total_panic_days * 100) if total_panic_days > 0 else 100
+                        
+                        # --- 新增：計算 50MA 與 乖離率 ---
+                        valid_s = s_series.dropna()
+                        if len(valid_s) >= 50:
+                            ma50_val = valid_s.rolling(window=50).mean().iloc[-1]
+                            price_now = valid_s.iloc[-1]
+                            bias_50 = ((price_now - ma50_val) / ma50_val) * 100
+                        else:
+                            bias_50 = 0.0 # 避免新股資料不足報錯
+                            
+                        # 🛡️ 轉譯：計算馬克 7 大趨勢模板核心條件
+                        if len(valid_s) >= 200:
+                            sma50_s = valid_s.rolling(50).mean()
+                            sma150_s = valid_s.rolling(150).mean()
+                            sma200_s = valid_s.rolling(200).mean()
+                            
+                            p_now = valid_s.iloc[-1]
+                            m50 = sma50_s.iloc[-1]
+                            m150 = sma150_s.iloc[-1]
+                            m200 = sma200_s.iloc[-1]
+                            m200_22 = sma200_s.shift(22).iloc[-1] if len(sma200_s) > 22 else np.nan
+                            
+                            h252 = valid_s.rolling(252, min_periods=1).max().iloc[-1]
+                            l252 = valid_s.rolling(252, min_periods=1).min().iloc[-1]
+                            
+                            cond1 = (p_now > m150) and (p_now > m200)
+                            cond2 = m150 > m200
+                            cond3 = (m200 > m200_22) if not pd.isna(m200_22) else False
+                            cond4 = (m50 > m150) and (m50 > m200)
+                            cond5 = p_now > m50
+                            cond6 = ((p_now / l252) - 1) * 100 >= 25 if l252 > 0 else False
+                            cond7 = (1 - (p_now / h252)) * 100 <= 25 if h252 > 0 else False
+                            
+                            is_trend_template = cond1 and cond2 and cond3 and cond4 and cond5 and cond6 and cond7
+                        else:
+                            is_trend_template = False
+                            p_now = valid_s.iloc[-1] if not valid_s.empty else np.nan
 
-                    # ==========================================
-                    # 💡 【核心整合】原第 11 欄：VCP 與 動能狀態判定 💡
-                    # ==========================================
-                    is_price_new_high = False
-                    is_alpha_new_high = False
-                    is_alpha_lagging = False
-                    is_vcp_80 = False
-                    is_vcp_90 = False
-                    is_rs_recovering = False
-                    
-                    if len(valid_s) >= 30:
-                        # 建立對比 0050 的相對強度曲線 (Alpha RS 原理)
-                        same_idx_b = b_c.reindex(valid_s.index).ffill()
-                        rel_close = valid_s / same_idx_b
+                        # ==========================================
+                        # 💡 【核心整合】原第 11 欄：VCP 與 動能狀態判定 💡
+                        # ==========================================
+                        is_price_new_high = False
+                        is_alpha_new_high = False
+                        is_alpha_lagging = False
+                        is_vcp_80 = False
+                        is_vcp_90 = False
+                        is_rs_recovering = False
                         
-                        # 雙軌領先/背離偵測 (以30日為基準軸)
-                        is_price_new_high = p_now >= valid_s.iloc[-31:-1].max()
-                        is_alpha_new_high = rel_close.iloc[-1] >= rel_close.iloc[-31:-1].max()
-                        is_alpha_lagging = rel_close.iloc[-1] < rel_close.iloc[-31:-1].max()
+                        if len(valid_s) >= 30:
+                            # 建立對比 0050 的相對強度曲線 (Alpha RS 原理)
+                            same_idx_b = b_c.reindex(valid_s.index).ffill()
+                            rel_close = valid_s / same_idx_b
+                            
+                            # 雙軌領先/背離偵測 (以30日為基準軸)
+                            is_price_new_high = p_now >= valid_s.iloc[-31:-1].max()
+                            is_alpha_new_high = rel_close.iloc[-1] >= rel_close.iloc[-31:-1].max()
+                            is_alpha_lagging = rel_close.iloc[-1] < rel_close.iloc[-31:-1].max()
+                            
+                            # 短線動能回復 (Relative RS 連續3日走揚)
+                            if len(rel_close) >= 3:
+                                is_rs_recovering = rel_close.iloc[-1] > rel_close.iloc[-2] and rel_close.iloc[-2] > rel_close.iloc[-3]
+                            
+                            # VCP 緊縮指標量化計算 (5日價格波動度 / 20日均值)
+                            roll_std5 = valid_s.rolling(5).std()
+                            roll_mean5 = valid_s.rolling(5).mean()
+                            cv_5 = roll_std5 / roll_mean5
+                            if len(cv_5) >= 20:
+                                cv_5_ma20 = cv_5.rolling(20).mean()
+                                cv_5_now = cv_5.iloc[-1]
+                                cv_5_ma20_now = cv_5_ma20.iloc[-1]
+                                is_vcp_80 = cv_5_now < cv_5_ma20_now * 0.80
+                                is_vcp_90 = cv_5_now < cv_5_ma20_now * 0.90
                         
-                        # 短線動能回復 (Relative RS 連續3日走揚)
-                        if len(rel_close) >= 3:
-                            is_rs_recovering = rel_close.iloc[-1] > rel_close.iloc[-2] and rel_close.iloc[-2] > rel_close.iloc[-3]
+                        is_rs_leading = (not is_price_new_high) and is_alpha_new_high
+                        is_div_warning = is_price_new_high and is_alpha_lagging
                         
-                        # VCP 緊縮指標量化計算 (5日價格波動度 / 20日均值)
-                        roll_std5 = valid_s.rolling(5).std()
-                        roll_mean5 = valid_s.rolling(5).mean()
-                        cv_5 = roll_std5 / roll_mean5
-                        if len(cv_5) >= 20:
-                            cv_5_ma20 = cv_5.rolling(20).mean()
-                            cv_5_now = cv_5.iloc[-1]
-                            cv_5_ma20_now = cv_5_ma20.iloc[-1]
-                            is_vcp_80 = cv_5_now < cv_5_ma20_now * 0.80
-                            is_vcp_90 = cv_5_now < cv_5_ma20_now * 0.90
-                    
-                    is_rs_leading = (not is_price_new_high) and is_alpha_new_high
-                    is_div_warning = is_price_new_high and is_alpha_lagging
-                    
-                    # 結構特徵分配
-                    if is_vcp_80:
-                        struct_status = "💎 極致壓縮(80%+CV)"
-                    elif is_vcp_90:
-                        struct_status = "🔥 相對壓縮(90%+CV)"
-                    elif is_rs_recovering:
-                        struct_status = "📈 動能回復中"
-                    else:
-                        struct_status = "⏳ 區間整理"
+                        # 結構特徵分配
+                        if is_vcp_80:
+                            struct_status = "💎 極致壓縮(80%+CV)"
+                        elif is_vcp_90:
+                            struct_status = "🔥 相對壓縮(90%+CV)"
+                        elif is_vcp_80:
+                            struct_status = "📈 動能回復中"
+                        else:
+                            struct_status = "⏳ 區間整理"
+                            
+                        # 領先與背離狀態首碼
+                        lead_prefix = ""
+                        if is_rs_leading:
+                            lead_prefix = "🌟 雙軌領先 | "
+                        elif is_div_warning:
+                            lead_prefix = "⚠️ 雙軌背離 | "
+                            
+                        vcp_status_final = lead_prefix + struct_status
                         
-                    # 領先與背離狀態首碼
-                    lead_prefix = ""
-                    if is_rs_leading:
-                        lead_prefix = "🌟 雙軌領先 | "
-                    elif is_div_warning:
-                        lead_prefix = "⚠️ 雙軌背離 | "
+                        # 依據判定結果在股票名稱前標記 ✅ 或 ❌，並在後方結合 VCP/動能 綜合狀態字串
+                        display_name = f"✅ {stock['name']} 【{vcp_status_final}】" if is_trend_template else f"❌ {stock['name']} 【{vcp_status_final}】"
                         
-                    vcp_status_final = lead_prefix + struct_status
-                    
-                    # 依據判定結果在股票名稱前標記 ✅ 或 ❌，並在後方結合 VCP/動能 綜合狀態字串
-                    display_name = f"✅ {stock['name']} 【{vcp_status_final}】" if is_trend_template else f"❌ {stock['name']} 【{vcp_status_final}】"
-                    
-                    integrated_results.append({
-                        "股票代號": ticker.split(".")[0], "股票名稱": display_name,
-                        "50MA乖離率(%)": bias_50,
-                        "IBD式 絕對分數": ibd, "對比 0050 超額強度": ibd - benchmark_ibd_score,
-                        "短線抗跌韌性分數": resilience, "逆風勝率": f"{outperform} / {total_panic_days} 天",
-                        "逆風上漲天數": f"{np.sum(s_ret.reindex(panic_dates_list) > 0)} 天"
-                    })
-                
-                # --- 修改：核心排序邏輯變更為「對比 0050 超額強度」由高到低（ascending=False） ---
-                df_final = pd.DataFrame(integrated_results).sort_values("對比 0050 超額強度", ascending=False)
-                
-                # 🛠️ 核心改動：調整欄位順序，把「50MA乖離率(%)」放到最後面
-                cols = df_final.columns.tolist()
-                if "50MA乖離率(%)" in cols:
-                    cols.remove("50MA乖離率(%)")
-                    cols.append("50MA乖離率(%)")
-                df_final = df_final[cols]
-                
-                st.subheader(f"📊 雙軌數據交叉比對表 (大盤恐慌日：{total_panic_days} 天)")
-                st.info(f"💡 照妖鏡判定：{level_desc}。抗跌合格線：`{dynamic_threshold}%`")
-                
-                # 🌟 新增：符號意義說明區塊 (是否符合馬克選股模板 + VCP 狀態註解)
-                with st.expander("🔍 符號意義與馬克趨勢模板 (Trend Template) 說明", expanded=False):
-                    st.markdown("""
-                    * ✅ 符合標記：代表該股目前完全符合馬克·米奈爾維尼（Mark Minervini）的 7 大趨勢模板核心條件，正處於健康的第二階段（Stage 2）上升趨勢。
-                    * ❌ 未符標記：代表該股目前未全數滿足 7 項技術面排列準則（可能均線結構仍待修復，或距 52 週高低點比例未達標）。
-                    
-                    🌀 VCP / 動能狀態動態標籤說明：
-                    * 🌟 雙軌領先：個股股價尚未突破30日新高，但相對強度 (Alpha RS 曲線) 已率先刷新30日紀錄，暗示機構暗中強勢吃貨，極具爆發力。
-                    * ⚠️ 雙軌背離：股價已創30日新高，但相對強度未同步創高，短線動能呈現隱形落後，需警惕高檔假突破。
-                    * 💎 極致壓縮(80%+CV)：5日價格變異係數收縮至20日均值的 80% 以下，籌碼極度洗淨，多空面臨臨界點。
-                    * 🔥 相對壓縮(90%+CV)：5日價格變異係數收縮至20日均值的 90% 以下，進入標準 VCP 波幅收緊軌道。
-                    * 📈 動能回復中：短線相對強度曲線扭轉下行趨勢、連續 3 日走揚，代表短期動能正由弱轉強。
-                    * ⏳ 區間整理：股價與動能處於正常箱型、橫盤 or 洗盤沉澱階段，未出現極端信號。
-                    
-                    📝 馬克選股 7 大趨勢模板核心準則：
-                    1. 現價 > 150MA 且 現價 > 200MA（股價站長線均線之上）
-                    2. 150MA > 200MA（長線均線維持多頭排列）
-                    3. 200MA 處於上升趨勢（至少上揚 1 個月，此系統比對 22 天前數據）
-                    4. 50MA > 150MA 且 50MA > 200MA（中期均線多頭黃金交叉）
-                    5. 現價 > 50MA（股價站穩中期生命線）
-                    6. 現價較過去 52 週最低點高出至少 25%（展現強勁築底反彈力道）
-                    7. 現價距離過去 52 週最高點在 25% 以內（高檔強勢整理，伺機向上突破樞紐點）
-                    """)
-                
-                if skipped_stocks:
-                    st.warning(f"⚠️ 以下輸入內容格式正確，但 yfinance 查無交易歷史數據（可能剛上市或打錯）：{', '.join(skipped_stocks)}")
-                
-                # --- 新增：將 50MA乖離率 顯示在主表格中 ---
-                st.dataframe(df_final, use_container_width=True, hide_index=True, column_config={
-                    "50MA乖離率(%)": st.column_config.NumberColumn("50MA乖離率", format="%.2f%%"),
-                    "IBD式 絕對分數": st.column_config.NumberColumn("IBD式 絕對強度", format="%.1f"),
-                    "短線抗跌韌性分數": st.column_config.ProgressColumn("抗跌得分", min_value=0, max_value=100, format="%.0f分")
-                })
-                
-                # 四象限戰略部署
-                st.divider()
-                st.subheader("🏁 Mark Minervini 流派：雙軌交叉戰略部署")
-                st.caption("💡 註：括號內為 50MA 乖離率(%)。馬克心法：『不追高乖離，控好風險報酬比，專注基底與樞紐點突破。』")
-                true_leaders = df_final[(df_final["對比 0050 超額強度"] > 0) & (df_final["短線抗跌韌性分數"] >= dynamic_threshold)]
-                momentum_only = df_final[(df_final["對比 0050 超額強度"] > 0) & (df_final["短線抗跌韌性分數"] < dynamic_threshold)]
-                defensive_only = df_final[(df_final["對比 0050 超額強度"] <= 0) & (df_final["短線抗跌韌性分數"] >= dynamic_threshold)]
-                laggards = df_final[(df_final["對比 0050 超額強度"] <= 0) & (df_final["短線抗跌韌性分數"] < dynamic_threshold)]
-                
-                # --- 新增：自訂輸出格式函式，調整為直向 Markdown 條列式排列以利對齊 ---
-                def format_stocks(df):
-                    if df.empty:
-                        return "無"
-                    return "\n".join([f"* {row['股票名稱']} `({row['50MA乖離率(%)']:.1f}%)`" for _, row in df.iterrows()])
+                        # ==========================================
+                        # 🆕 新增功能：計算從回溯基準日到今天的實際績效
+                        # ==========================================
+                        valid_s_all = s_series_all.dropna()
+                        if not valid_s_all.empty and valid_s_all.index[-1] > valid_s.index[-1]:
+                            future_return = ((valid_s_all.iloc[-1] / p_now) - 1) * 100
+                        else:
+                            future_return = 0.0
 
-                c1, c2 = st.columns(2)
-                c1.success(f"### 👑 第一象限：逆風真龍頭 ({len(true_leaders)} 檔)"); c1.write(format_stocks(true_leaders)); c1.caption("👉 戰略部署：長線動能擊敗大盤，且短線抗跌表現達到當前動態合格線以上。隨時注意 VCP 出量突破。")
-                c1.info(f"### 🚀 第二象限：高 Beta 攻擊兵 ({len(momentum_only)} 檔)"); c1.write(format_stocks(momentum_only)); c1.caption("👉 戰略部署：長線極強，但修正波動高於大盤. 一旦大盤止穩，這群股票往往是右側出量追擊的首選。")
-                c2.warning(f"### 🛡️ 第三象限：資金避風港 ({len(defensive_only)} 檔)"); c2.write(format_stocks(defensive_only)); c2.caption("👉 戰略部署：短線極度抗跌，長線動能尚未完全追上。若有打底完成標的，高抗跌意味主力在低檔死守，值得關注！")
-                c2.error(f"### 🚨 第四象限：無情剔除名單 ({len(laggards)} 檔)"); c2.write(format_stocks(laggards)); c2.caption("👉 戰略部署：長短線皆跑輸大盤，在馬克系統中屬於弱勢標的，建議審慎評估資金配置與汰弱留強。")
-                
+                        integrated_results.append({
+                            "股票代號": ticker.split(".")[0], "股票名稱": display_name,
+                            "50MA乖離率(%)": bias_50,
+                            "IBD式 絕對分數": ibd, "對比 0050 超額強度": ibd - benchmark_ibd_score,
+                            "短線抗跌韌性分數": resilience, "逆風勝率": f"{outperform} / {total_panic_days} 天",
+                            "逆風上漲天數": f"{np.sum(s_ret.reindex(panic_dates_list) > 0)} 天",
+                            "回溯後實際報酬(%)": future_return # 儲存績效數據
+                        })
+                    
+                    # --- 修改：核心排序邏輯變更為「對比 0050 超額強度」由高到低（ascending=False） ---
+                    df_final = pd.DataFrame(integrated_results).sort_values("對比 0050 超額強度", ascending=False)
+                    
+                    # 🛠️ 核心改動：調整欄位順序，把「50MA乖離率(%)」與「回溯後實際報酬(%)」放到後面
+                    cols = df_final.columns.tolist()
+                    if "50MA乖離率(%)" in cols:
+                        cols.remove("50MA乖離率(%)")
+                        cols.append("50MA乖離率(%)")
+                    if "回溯後實際報酬(%)" in cols:
+                        cols.remove("回溯後實際報酬(%)")
+                        # 如果在回測模式，就把實際報酬往前移到第三欄顯眼處，否則放最後
+                        if is_backtesting:
+                            cols.insert(2, "回溯後實際報酬(%)")
+                        else:
+                            cols.append("回溯後實際報酬(%)")
+                    df_final = df_final[cols]
+                    
+                    st.subheader(f"📊 雙軌數據交叉比對表 (基準日大盤恐慌日：{total_panic_days} 天)")
+                    
+                    # 提示當前回溯狀態
+                    if is_backtesting:
+                        st.warning(f"🕒 目前處於【回溯歷史選股模式】。基準日：{backtest_date.strftime('%Y-%m-%d')}。已為您計算從該日至今的實際績效表現。")
+                    else:
+                        st.info(f"💡 照妖鏡判定：{level_desc}。抗跌合格線：`{dynamic_threshold}%`")
+                    
+                    # 🌟 新增：符號意義說明區塊 (是否符合馬克選股模板 + VCP 狀態註解)
+                    with st.expander("🔍 符號意義與馬克趨勢模板 (Trend Template) 說明", expanded=False):
+                        st.markdown("""
+                        * ✅ 符合標記：代表該股目前完全符合馬克·米奈爾維尼（Mark Minervini）的 7 大趨勢模板核心條件，正處於健康的第二階段（Stage 2）上升趨勢。
+                        * ❌ 未符標記：代表該股目前未全數滿足 7 項技術面排列準則（可能均線結構仍待修復，或距 52 週高低點比例未達標）。
+                        
+                        🌀 VCP / 動能狀態動態標籤說明：
+                        * 🌟 雙軌領先：個股股價尚未突破30日新高，但相對強度 (Alpha RS 曲線) 已率先刷新30日紀錄，暗示機構暗中強勢吃貨，極具爆發力。
+                        * ⚠️ 雙軌背離：股價已創30日新高，但相對強度未同步創高，短線動能呈現隱形落後，需警惕高檔假突破。
+                        * 💎 極致壓縮(80%+CV)：5日價格變異係數收縮至20日均值的 80% 以下，籌碼極度洗淨，多空面臨臨界點。
+                        * 🔥 相對壓縮(90%+CV)：5日價格變異係數收縮至20日均值的 90% 以下，進入標準 VCP 波幅收緊軌道。
+                        * 📈 動能回復中：短線相對強度曲線扭轉下行趨勢、連續 3 日走揚，代表短期動能正由弱轉強。
+                        * ⏳ 區間整理：股價與動能處於正常箱型、橫盤 or 洗盤沉澱階段，未出現極端信號。
+                        
+                        📝 馬克選股 7 大趨勢模板核心準則：
+                        1. 現價 > 150MA 且 現價 > 200MA（股價站長線均線之上）
+                        2. 150MA > 200MA（長線均線維持多頭排列）
+                        3. 200MA 處於上升趨勢（至少上揚 1 個月，此系統比對 22 天前數據）
+                        4. 50MA > 150MA 且 50MA > 200MA（中期均線多頭黃金交叉）
+                        5. 現價 > 50MA（股價站穩中期生命線）
+                        6. 現價較過去 52 週最低點高出至少 25%（展現強勁築底反彈力道）
+                        7. 現價距離過去 52 週最高點在 25% 以內（高檔強勢整理，伺機向上突破樞紐點）
+                        """)
+                    
+                    if skipped_stocks:
+                        st.warning(f"⚠️ 以下輸入內容格式正確，但 yfinance 查無交易歷史數據（可能剛上市或打錯）：{', '.join(skipped_stocks)}")
+                    
+                    # --- 新增：將 50MA乖離率 顯示在主表格中 ---
+                    column_config_dict = {
+                        "50MA乖離率(%)": st.column_config.NumberColumn("50MA乖離率", format="%.2f%%"),
+                        "IBD式 絕對分數": st.column_config.NumberColumn("IBD式 絕對強度", format="%.1f"),
+                        "短線抗跌韌性分數": st.column_config.ProgressColumn("抗跌得分", min_value=0, max_value=100, format="%.0f分")
+                    }
+                    if is_backtesting:
+                        column_config_dict["回溯後實際報酬(%)"] = st.column_config.NumberColumn("🎯 回測實質報酬率", format="%.2f%%")
+                    else:
+                        column_config_dict["回溯後實際報酬(%)"] = st.column_config.NumberColumn("今日至今持平率", format="%.2f%%")
+                        
+                    st.dataframe(df_final, use_container_width=True, hide_index=True, column_config=column_config_dict)
+                    
+                    # 四象限戰略部署
+                    st.divider()
+                    st.subheader("🏁 Mark Minervini 流派：雙軌交叉戰略部署")
+                    st.caption("💡 註：括號內為 50MA 乖離率(%)。右側標註為【回測實際報酬率】。")
+                    true_leaders = df_final[(df_final["對比 0050 超額強度"] > 0) & (df_final["短線抗跌韌性分數"] >= dynamic_threshold)]
+                    momentum_only = df_final[(df_final["對比 0050 超額強度"] > 0) & (df_final["短線抗跌韌性分數"] < dynamic_threshold)]
+                    defensive_only = df_final[(df_final["對比 0050 超額強度"] <= 0) & (df_final["短線抗跌韌性分數"] >= dynamic_threshold)]
+                    laggards = df_final[(df_final["對比 0050 超額強度"] <= 0) & (df_final["短線抗跌韌性分數"] < dynamic_threshold)]
+                    
+                    # --- 新增：自訂輸出格式函式，調整為直向 Markdown 條列式排列以利對齊，並主動附帶回測報酬率 ---
+                    def format_stocks(df, show_perf=False):
+                        if df.empty:
+                            return "無"
+                        lines = []
+                        for _, row in df.iterrows():
+                            perf_str = f" ➡️ **後續報酬: {row['回溯後實際報酬(%)']:.1f}%**" if show_perf else ""
+                            lines.append(f"* {row['股票名稱']} `({row['50MA乖離率(%)']:.1f}%)`{perf_str}")
+                        return "\n".join(lines)
+
+                    c1, c2 = st.columns(2)
+                    c1.success(f"### 👑 第一象限：逆風真龍頭 ({len(true_leaders)} 檔)"); c1.write(format_stocks(true_leaders, is_backtesting)); c1.caption("👉 戰略部署：長線動能擊敗大盤，且短線抗跌表現達到當前動態合格線以上。隨時注意 VCP 出量突破。")
+                    c1.info(f"### 🚀 第二象限：高 Beta 攻擊兵 ({len(momentum_only)} 檔)"); c1.write(format_stocks(momentum_only, is_backtesting)); c1.caption("👉 戰略部署：長線極強，但修正波動高於大盤. 一旦大盤止穩，這群股票往往是右側出量追擊的首選。")
+                    c2.warning(f"### 🛡️ 第三象限：資金避風港 ({len(defensive_only)} 檔)"); c2.write(format_stocks(defensive_only, is_backtesting)); c2.caption("👉 戰略部署：短線極度抗跌，長線動能尚未完全追上。若有打底完成標的，高抗跌意味主力在低檔死守，值得關注！")
+                    c2.error(f"### 🚨 第四象限：無情剔除名單 ({len(laggards)} 檔)"); c2.write(format_stocks(laggards, is_backtesting)); c2.caption("👉 戰略部署：長短線皆跑輸大盤，在馬克系統中屬於弱勢標的，建議審慎評估資金配置與汰弱留強。")
+                    
         except Exception as e:
             st.error(f"數據錯誤: {e}")
