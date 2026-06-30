@@ -50,7 +50,7 @@ with st.expander("📖 閱讀 SEPA 系統核心心法 (Trade Like a Stock Market
     🎯 真正能創造數倍暴利的市場領導股（Market Leaders），通常具有以下三個特質：
     1. 在大盤中度修正時，它們跌得最少（甚至逆勢橫盤或創高）。
     2. 在大盤觸底時，它們是最先拔地而起、率先突破的個股。
-    3. 大盤的跌勢，是在幫 these 強勢股清洗浮額（Weak hands），並讓其完美的 VCP（波動率收縮型態） 成型。
+    3. 大盤的跌勢，是在幫這些強勢股清洗浮額（Weak hands），並讓其完美的 VCP（波動率收縮型態） 成型。
     """)
 
 st.markdown("""
