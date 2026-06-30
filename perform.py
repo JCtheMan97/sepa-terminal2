@@ -54,8 +54,6 @@ with st.sidebar.form("sepa_integrated_form"):
     stock_input = st.text_area("🎯 輸入待篩選池 (支援複製任何來源雜訊，系統會自動清洗)", value=default_pool, height=250)
     
     st.subheader("【多軌照妖鏡參數】")
-    # 🌟 升級功能：改為讓使用者在前端自由輸入三個天數（預設為 20, 30, 45）
-    track_days_input = st.text_input("自訂三個對比天數 (請用半形逗號隔開)", value="20, 30, 45")
     market_threshold = st.slider("大盤恐慌日定義 (單日跌幅 %)", min_value=0.5, max_value=2.5, value=1.0, step=0.1)
     
     submit_btn = st.form_submit_button("🚀 一鍵平行交叉篩選新標的")
@@ -106,14 +104,6 @@ if submit_btn or st.session_state.first_run:
             if not STOCKS_POOL:
                 st.error("❌ 未偵測到任何有效的股票代號，請重新輸入。")
             else:
-                # 🌟 升級功能：動態解析使用者輸入的天數 (自動防錯與補足機制)
-                try:
-                    track_days = [int(x.strip()) for x in track_days_input.split(",") if x.strip().isdigit()][:3]
-                    if len(track_days) < 3:
-                        track_days += [20, 30, 45][len(track_days):]
-                except Exception:
-                    track_days = [20, 30, 45]
-                
                 all_tickers = ["0050.TW"] + [stock["id"] for stock in STOCKS_POOL]
                 df_all = fetch_and_sync_data(tuple(all_tickers), start_date_long.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
                 
@@ -125,7 +115,8 @@ if submit_btn or st.session_state.first_run:
                 b_now, b_3m, b_6m, b_9m, b_1y = b_c.loc[idx_now], b_c.loc[idx_3m], b_c.loc[idx_6m], b_c.loc[idx_9m], b_c.loc[idx_1y]
                 benchmark_ibd_score = ((b_now/b_3m*2) + (b_now/b_6m) + (b_now/b_9m) + (b_now/b_1y)) / 5 * 100
                 
-                # 🚀 核心升級：平行計算動態多軌大盤恐慌日與日期清單
+                # 🚀 核心升級：平行計算多軌（20, 30, 45天）大盤恐慌日與日期清單
+                track_days = [20, 30, 45]
                 track_panic_info = {}
                 
                 for days in track_days:
@@ -164,7 +155,14 @@ if submit_btn or st.session_state.first_run:
                     
                     s_ret = s_series.pct_change() * 100
                     
-                    # 🚀 核心升級：一鍵平行算出使用者自訂三軌之韌性分數
+                    # 計算該標的在整個觀測期（550天）以來的總波段漲跌幅 (%)
+                    valid_s_all = s_series.dropna()
+                    if len(valid_s_all) >= 2:
+                        total_return = ((valid_s_all.iloc[-1] / valid_s_all.iloc[0]) - 1) * 100
+                    else:
+                        total_return = 0.0
+                    
+                    # 🚀 核心升級：一鍵平行算出三軌韌性分數
                     resilience_scores = {}
                     for days in track_days:
                         p_dates = track_panic_info[days]["dates"]
@@ -243,60 +241,63 @@ if submit_btn or st.session_state.first_run:
                     
                     display_name = f"✅ {stock['name']} 【{vcp_status_final}】" if is_trend_template else f"❌ {stock['name']} 【{vcp_status_final}】"
                     
-                    # 🚀 多軌全紀錄：動態寫入字典
-                    stock_res_data = {
+                    # 🚀 多軌全紀錄
+                    integrated_results.append({
                         "股票代號": ticker.split(".")[0], 
                         "股票名稱": display_name,
                         "對比 0050 超額強度": ibd - benchmark_ibd_score,
+                        "20日抗跌分": resilience_scores[20],
+                        "30日抗跌分": resilience_scores[30],
+                        "45日抗跌分": resilience_scores[45],
                         "IBD式 絕對分數": ibd, 
-                        "50MA乖離率(%)": bias_50
-                    }
-                    # 動態拼裝自訂天數的抗跌分 key
-                    for d in track_days:
-                        stock_res_data[f"{d}日抗跌分"] = resilience_scores[d]
-                        
-                    integrated_results.append(stock_res_data)
+                        "50MA乖離率(%)": bias_50,
+                        "波段總漲幅(%)": total_return  # 👈 新增欄位
+                    })
                 
                 # 資料排序 (依據超額強度)
                 df_final = pd.DataFrame(integrated_results).sort_values("對比 0050 超額強度", ascending=False)
                 
                 # --- 📊 輸出大表與多軌配置說明 ---
                 st.subheader("📊 雙軌數據多軌平行交叉比對表")
-                st.caption(f"💡 本表已同時平行運算短線三軌抗跌指標（大盤恐慌日：{track_days[0]}日={track_panic_info[track_days[0]]['total_panic']}天 | {track_days[1]}日={track_panic_info[track_days[1]]['total_panic']}天 | {track_days[2]}日={track_panic_info[track_days[2]]['total_panic']}天）")
+                st.caption(f"💡 本表已同時平行運算短線三軌抗跌指標（大盤恐慌日：20日={track_panic_info[20]['total_panic']}天 | 30日={track_panic_info[30]['total_panic']}天 | 45日={track_panic_info[45]['total_panic']}天）")
                 
                 if skipped_stocks:
                     st.warning(f"⚠️ 以下輸入內容格式正確，但 yfinance 查無交易歷史數據：{', '.join(skipped_stocks)}")
                 
-                # 🌟 升級功能：主表格渲染設定 (ProgressColumn 採動態欄位指派)
-                dynamic_config = {
+                # 主表格渲染 (採用多軌配置) -> 欄位後方加入漲幅
+                st.dataframe(df_final, use_container_width=True, hide_index=True, column_config={
+                    "20日抗跌分": st.column_config.ProgressColumn("20日抗跌分", min_value=0, max_value=100, format="%.0f分"),
+                    "30日抗跌分": st.column_config.ProgressColumn("30日抗跌分", min_value=0, max_value=100, format="%.0f分"),
+                    "45日抗跌分": st.column_config.ProgressColumn("45日抗跌分", min_value=0, max_value=100, format="%.0f分"),
                     "IBD式 絕對分數": st.column_config.NumberColumn("IBD絕對強度", format="%.1f"),
                     "對比 0050 超額強度": st.column_config.NumberColumn("超額動能", format="%.1f"),
-                    "50MA乖離率(%)": st.column_config.NumberColumn("50MA乖離率", format="%.2f%%")
-                }
-                for d in track_days:
-                    dynamic_config[f"{d}日抗跌分"] = st.column_config.ProgressColumn(f"{d}日抗跌分", min_value=0, max_value=100, format="%.0f分")
+                    "50MA乖離率(%)": st.column_config.NumberColumn("50MA乖離率", format="%.2f%%"),
+                    "波段總漲幅(%)": st.column_config.NumberColumn("波段總漲幅", format="%.1f%%")  # 👈 顯示波段漲幅
+                })
                 
-                st.dataframe(df_final, use_container_width=True, hide_index=True, column_config=dynamic_config)
-                
-                # 🏁 多軌交叉新標的戰略部署
+                # 🏁 篩選新標的專用：三軌全合格【真龍頭獵殺區】
                 st.divider()
-                st.subheader(f"🏁 篩選新標的專用：三軌全合格【真龍頭獵殺區】")
-                st.caption(f"💡 篩選標準：長線動能大於大盤，且不論 {track_days[0]}/{track_days[1]}/{track_days[2]} 天的短線照妖鏡，抗跌分數皆達到動態防守門檻以上。")
+                st.subheader("🏁 篩選新標的專用：三軌全合格【真龍頭獵殺區】")
+                st.caption("💡 篩選標準：長線動能大於大盤，且不論 20/30/45 天的短線照妖鏡，抗跌分數皆達到動態防守門檻以上（拒絕下跌）。")
                 
-                # 🌟 升級功能：定義動態三軌同時合格邏輯
-                c1_passed = df_final[f"{track_days[0]}日抗跌分"] >= track_panic_info[track_days[0]]["threshold"]
-                c2_passed = df_final[f"{track_days[1]}日抗跌分"] >= track_panic_info[track_days[1]]["threshold"]
-                c3_passed = df_final[f"{track_days[2]}日抗跌分"] >= track_panic_info[track_days[2]]["threshold"]
+                # 定義三軌同時合格
+                c20_passed = df_final["20日抗跌分"] >= track_panic_info[20]["threshold"]
+                c30_passed = df_final["30日抗跌分"] >= track_panic_info[30]["threshold"]
+                c45_passed = df_final["45日抗跌分"] >= track_panic_info[45]["threshold"]
                 alpha_passed = df_final["對比 0050 超額強度"] > 0
                 
                 # 新標的分流
-                all_pass_leaders = df_final[alpha_passed & c1_passed & c2_passed & c3_passed]
+                all_pass_leaders = df_final[alpha_passed & c20_passed & c30_passed & c45_passed]
                 vcp_incubating = all_pass_leaders[all_pass_leaders["股票名稱"].str.contains("💎|🔥")]
                 
-                # 🌟 升級功能：文字輸出也完全重構為動態 Key
+                # 在輸出字串後方直接串上 `[漲幅:xx.x%]`
                 def format_stocks(df):
                     if df.empty: return "無"
-                    return "\n".join([f"* {row['股票名稱']} `(乖離:{row['50MA乖離率(%)']:.1f}%)` [{track_days[0]}日:{row[f'{track_days[0]}日抗跌分']:.0f}分 | {track_days[1]}日:{row[f'{track_days[1]}日抗跌分']:.0f}分 | {track_days[2]}日:{row[f'{track_days[2]}日抗跌分']:.0f}分]" for _, row in df.iterrows()])
+                    return "\n".join([
+                        f"* {row['股票名稱']} `(乖離:{row['50MA乖離率(%)']:.1f}%)` **[漲幅:{row['波段總漲幅(%)']:.1f}%]**\n"
+                        f"  └ 📋 評分 -> 20日:{row['20日抗跌分']:.0f}分 | 30日:{row['30日抗跌分']:.0f}分 | 45日:{row['45日抗跌分']:.0f}分" 
+                        for _, row in df.iterrows()
+                    ])
 
                 col_l, col_r = st.columns(2)
                 
@@ -310,19 +311,24 @@ if submit_btn or st.session_state.first_run:
                     st.write(format_stocks(vcp_incubating))
                     st.caption("👉 極度重要：這群股票滿足了抗跌條件，且名字帶有 `💎` 或 `🔥`。代表主力正在低檔死守，且股價波動已收窄至極限、尚未噴發！這正是你要找的完美新標的。")
 
-                # 保留其餘四象限大聯盟分流，供快速點檢
-                with st.expander("📊 點檢其餘多軌象限分流（高Beta攻擊、資金防守）", expanded=False):
-                    any_pass_momentum = df_final[alpha_passed & ~(c1_passed & c2_passed & c3_passed)]
-                    any_pass_defensive = df_final[~alpha_passed & (c1_passed | c2_passed | c3_passed)]
-                    laggards = df_final[~alpha_passed & ~(c1_passed | c2_passed | c3_passed)]
-                    
-                    cx1, cx2, cx3 = st.columns(3)
-                    cx1.warning(f"#### 🚀 高 Beta 攻擊兵 ({len(any_pass_momentum)} 檔)")
-                    cx1.write(format_stocks(any_pass_momentum))
-                    cx2.info(f"#### 🛡️ 潛在補漲防守組 ({len(any_pass_defensive)} 檔)")
-                    cx2.write(format_stocks(any_pass_defensive))
-                    cx3.error(f"#### 🚨 汰弱留強剔除名單 ({len(laggards)} 檔)")
-                    cx3.write(format_stocks(laggards))
+                # 📊 原封不動完整保留：四象限大聯盟分流 (格式未改，僅在輸出串上漲幅)
+                st.divider()
+                st.subheader("📊 點檢其餘多軌象限分流（高Beta攻擊、資金防守）")
+                
+                any_pass_momentum = df_final[alpha_passed & ~(c20_passed & c30_passed & c45_passed)]
+                any_pass_defensive = df_final[~alpha_passed & (c20_passed | c30_passed | c45_passed)]
+                laggards = df_final[~alpha_passed & ~(c20_passed | c30_passed | c45_passed)]
+                
+                cx1, cx2, cx3 = st.columns(3)
+                with cx1:
+                    st.warning(f"#### 🚀 高 Beta 攻擊兵 ({len(any_pass_momentum)} 檔)")
+                    st.write(format_stocks(any_pass_momentum))
+                with cx2:
+                    st.info(f"#### 🛡️ 潛在補漲防守組 ({len(any_pass_defensive)} 檔)")
+                    st.write(format_stocks(any_pass_defensive))
+                with cx3:
+                    st.error(f"#### 🚨 汰弱留強剔除名單 ({len(laggards)} 檔)")
+                    st.write(format_stocks(laggards))
 
         except Exception as e:
             st.error(f"數據錯誤: {e}")
