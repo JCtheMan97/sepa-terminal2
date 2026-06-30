@@ -77,10 +77,14 @@ with st.sidebar.form("sepa_integrated_form"):
     market_threshold = st.slider("大盤恐慌日定義 (單日跌幅 %)", min_value=0.5, max_value=2.5, value=1.0, step=0.1)
     
     # ==========================================
-    # 🆕 新增功能：回溯時間軸與績效回測
+    # 🆕 新增功能：回溯時間軸與績效回測 (升級精準持有交易日)
     # ==========================================
     st.subheader("【🕒 歷史回溯與績效回測】")
     backtest_date = st.date_input("選擇回溯基準日 (以此日視為當時的今天)", value=datetime.today())
+    
+    # 🆕 新增：自訂持有天數（交易日）
+    holding_days = st.number_input("回溯後預計持有天數 (交易日)", min_value=1, max_value=120, value=20, step=1)
+    
     is_backtesting = backtest_date < datetime.today().date()
     
     submit_btn = st.form_submit_button("🚀 執行雙軌交叉選股分析")
@@ -158,8 +162,20 @@ if submit_btn or st.session_state.first_run:
                 if b_c.empty:
                     st.error("❌ 回溯基準日無交易數據或超出歷史範圍，請重新選擇。")
                 else:
+                    # 🚀 新增：精準定位歷史基準日在完整時間軸的位置，以推算後續固定天數的交易日
+                    idx_now = b_c.index[-1]
+                    loc_now = b_c_all.index.get_loc(idx_now)
+                    
+                    # 🚀 新增：推算後續第 X 個交易日的日期
+                    if loc_now + holding_days < len(b_c_all):
+                        idx_future = b_c_all.index[loc_now + holding_days]
+                        actual_holding_text = f"後續 {holding_days} 個交易日 (至 {idx_future.strftime('%Y-%m-%d')})"
+                    else:
+                        idx_future = b_c_all.index[-1]
+                        actual_holding_text = f"後續 {len(b_c_all) - 1 - loc_now} 個交易日 (資料庫極限至今日 {idx_future.strftime('%Y-%m-%d')})"
+
                     # 大盤基準線
-                    idx_now, idx_3m, idx_6m, idx_9m, idx_1y = b_c.index[-1], b_c.index[-63], b_c.index[-126], b_c.index[-189], b_c.index[-252]
+                    idx_3m, idx_6m, idx_9m, idx_1y = b_c.index[-63], b_c.index[-126], b_c.index[-189], b_c.index[-252]
                     b_now, b_3m, b_6m, b_9m, b_1y = b_c.loc[idx_now], b_c.loc[idx_3m], b_c.loc[idx_6m], b_c.loc[idx_9m], b_c.loc[idx_1y]
                     benchmark_ibd_score = ((b_now/b_3m*2) + (b_now/b_6m) + (b_now/b_9m) + (b_now/b_1y)) / 5 * 100
                     
@@ -283,7 +299,7 @@ if submit_btn or st.session_state.first_run:
                             struct_status = "💎 極致壓縮(80%+CV)"
                         elif is_vcp_90:
                             struct_status = "🔥 相對壓縮(90%+CV)"
-                        elif is_vcp_80:
+                        elif is_rs_recovering:
                             struct_status = "📈 動能回復中"
                         else:
                             struct_status = "⏳ 區間整理"
@@ -301,13 +317,16 @@ if submit_btn or st.session_state.first_run:
                         display_name = f"✅ {stock['name']} 【{vcp_status_final}】" if is_trend_template else f"❌ {stock['name']} 【{vcp_status_final}】"
                         
                         # ==========================================
-                        # 🆕 新增功能：計算從回溯基準日到今天的實際績效
+                        # 🚀 核心修改：精準推算「後續指定交易日內」的實質報酬率
                         # ==========================================
                         valid_s_all = s_series_all.dropna()
-                        if not valid_s_all.empty and valid_s_all.index[-1] > valid_s.index[-1]:
-                            future_return = ((valid_s_all.iloc[-1] / p_now) - 1) * 100
+                        if idx_future in valid_s_all.index:
+                            price_future = valid_s_all.loc[idx_future]
+                            future_return = ((price_future / p_now) - 1) * 100
                         else:
                             future_return = 0.0
+
+                        perf_col_key = f"後續{holding_days}日實際報酬(%)"
 
                         integrated_results.append({
                             "股票代號": ticker.split(".")[0], "股票名稱": display_name,
@@ -315,31 +334,33 @@ if submit_btn or st.session_state.first_run:
                             "IBD式 絕對分數": ibd, "對比 0050 超額強度": ibd - benchmark_ibd_score,
                             "短線抗跌韌性分數": resilience, "逆風勝率": f"{outperform} / {total_panic_days} 天",
                             "逆風上漲天數": f"{np.sum(s_ret.reindex(panic_dates_list) > 0)} 天",
-                            "回溯後實際報酬(%)": future_return # 儲存績效數據
+                            perf_col_key: future_return # 儲存自訂持有期的績效數據
                         })
                     
                     # --- 修改：核心排序邏輯變更為「對比 0050 超額強度」由高到低（ascending=False） ---
                     df_final = pd.DataFrame(integrated_results).sort_values("對比 0050 超額強度", ascending=False)
                     
-                    # 🛠️ 核心改動：調整欄位順序，把「50MA乖離率(%)」與「回溯後實際報酬(%)」放到後面
+                    # 🛠️ 核心改動：調整欄位順序，把「50MA乖離率(%)」與「後續X日實際報酬(%)」放到後面
                     cols = df_final.columns.tolist()
+                    perf_col_name = f"後續{holding_days}日實際報酬(%)"
+                    
                     if "50MA乖離率(%)" in cols:
                         cols.remove("50MA乖離率(%)")
                         cols.append("50MA乖離率(%)")
-                    if "回溯後實際報酬(%)" in cols:
-                        cols.remove("回溯後實際報酬(%)")
+                    if perf_col_name in cols:
+                        cols.remove(perf_col_name)
                         # 如果在回測模式，就把實際報酬往前移到第三欄顯眼處，否則放最後
                         if is_backtesting:
-                            cols.insert(2, "回溯後實際報酬(%)")
+                            cols.insert(2, perf_col_name)
                         else:
-                            cols.append("回溯後實際報酬(%)")
+                            cols.append(perf_col_name)
                     df_final = df_final[cols]
                     
                     st.subheader(f"📊 雙軌數據交叉比對表 (基準日大盤恐慌日：{total_panic_days} 天)")
                     
                     # 提示當前回溯狀態
                     if is_backtesting:
-                        st.warning(f"🕒 目前處於【回溯歷史選股模式】。基準日：{backtest_date.strftime('%Y-%m-%d')}。已為您計算從該日至今的實際績效表現。")
+                        st.warning(f"🕒 目前處於【回溯歷史選股模式】。基準日：{backtest_date.strftime('%Y-%m-%d')}。已為您追蹤其後 **{actual_holding_text}** 的精準實質報酬。")
                     else:
                         st.info(f"💡 照妖鏡判定：{level_desc}。抗跌合格線：`{dynamic_threshold}%`")
                     
@@ -350,7 +371,7 @@ if submit_btn or st.session_state.first_run:
                         * ❌ 未符標記：代表該股目前未全數滿足 7 項技術面排列準則（可能均線結構仍待修復，或距 52 週高低點比例未達標）。
                         
                         🌀 VCP / 動能狀態動態標籤說明：
-                        * 🌟 雙軌領先：個股股價尚未突破30日新高，但相對強度 (Alpha RS 曲線) 已率先刷新30日紀錄，暗示機構暗中強勢吃貨，極具爆發力。
+                        * 🌟 雙軌領先：個股股館尚未突破30日新高，但相對強度 (Alpha RS 曲線) 已率先刷新30日紀錄，暗示機構暗中強勢吃貨，極具爆發力。
                         * ⚠️ 雙軌背離：股價已創30日新高，但相對強度未同步創高，短線動能呈現隱形落後，需警惕高檔假突破。
                         * 💎 極致壓縮(80%+CV)：5日價格變異係數收縮至20日均值的 80% 以下，籌碼極度洗淨，多空面臨臨界點。
                         * 🔥 相對壓縮(90%+CV)：5日價格變異係數收縮至20日均值的 90% 以下，進入標準 VCP 波幅收緊軌道。
@@ -377,16 +398,16 @@ if submit_btn or st.session_state.first_run:
                         "短線抗跌韌性分數": st.column_config.ProgressColumn("抗跌得分", min_value=0, max_value=100, format="%.0f分")
                     }
                     if is_backtesting:
-                        column_config_dict["回溯後實際報酬(%)"] = st.column_config.NumberColumn("🎯 回測實質報酬率", format="%.2f%%")
+                        column_config_dict[perf_col_name] = st.column_config.NumberColumn(f"🎯 後續{holding_days}日報酬", format="%.2f%%")
                     else:
-                        column_config_dict["回溯後實際報酬(%)"] = st.column_config.NumberColumn("今日至今持平率", format="%.2f%%")
+                        column_config_dict[perf_col_name] = st.column_config.NumberColumn("今日至今持平率", format="%.2f%%")
                         
                     st.dataframe(df_final, use_container_width=True, hide_index=True, column_config=column_config_dict)
                     
                     # 四象限戰略部署
                     st.divider()
                     st.subheader("🏁 Mark Minervini 流派：雙軌交叉戰略部署")
-                    st.caption("💡 註：括號內為 50MA 乖離率(%)。右側標註為【回測實際報酬率】。")
+                    st.caption(f"💡 註：括號內為 50MA 乖離率(%)。右側標註為【後續 {holding_days} 日回測實際報酬率】。")
                     true_leaders = df_final[(df_final["對比 0050 超額強度"] > 0) & (df_final["短線抗跌韌性分數"] >= dynamic_threshold)]
                     momentum_only = df_final[(df_final["對比 0050 超額強度"] > 0) & (df_final["短線抗跌韌性分數"] < dynamic_threshold)]
                     defensive_only = df_final[(df_final["對比 0050 超額強度"] <= 0) & (df_final["短線抗跌韌性分數"] >= dynamic_threshold)]
@@ -398,7 +419,7 @@ if submit_btn or st.session_state.first_run:
                             return "無"
                         lines = []
                         for _, row in df.iterrows():
-                            perf_str = f" ➡️ **後續報酬: {row['回溯後實際報酬(%)']:.1f}%**" if show_perf else ""
+                            perf_str = f" ➡️ 後續報酬: {row[perf_col_name]:.1f}%" if show_perf else ""
                             lines.append(f"* {row['股票名稱']} `({row['50MA乖離率(%)']:.1f}%)`{perf_str}")
                         return "\n".join(lines)
 
