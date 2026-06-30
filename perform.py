@@ -50,7 +50,7 @@ with st.expander("📖 閱讀 SEPA 系統核心心法 (Trade Like a Stock Market
     🎯 真正能創造數倍暴利的市場領導股（Market Leaders），通常具有以下三個特質：
     1. 在大盤中度修正時，它們跌得最少（甚至逆勢橫盤或創高）。
     2. 在大盤觸底時，它們是最先拔地而起、率先突破的個股。
-    3. 大盤的跌勢，是在幫這些強勢股清洗浮額（Weak hands），並讓其完美的 VCP（波動率收縮型態） 成型。
+    3. 大盤的跌勢，是在幫 these 強勢股清洗浮額（Weak hands），並讓其完美的 VCP（波動率收縮型態） 成型。
     """)
 
 st.markdown("""
@@ -360,7 +360,7 @@ if submit_btn or st.session_state.first_run:
                     
                     # 提示當前回溯狀態
                     if is_backtesting:
-                        st.warning(f"🕒 目前處於【回溯歷史選股模式】。基準日：{backtest_date.strftime('%Y-%m-%d')}。已為您追蹤其後 **{actual_holding_text}** 的精準實質報酬。")
+                        st.warning(f"🕒 目前處於【回溯歷史選股模式】。基準日：{backtest_date.strftime('%Y-%m-%d')}。已為您追蹤其後 {actual_holding_text} 的精準實質報酬。")
                     else:
                         st.info(f"💡 照妖鏡判定：{level_desc}。抗跌合格線：`{dynamic_threshold}%`")
                     
@@ -402,7 +402,23 @@ if submit_btn or st.session_state.first_run:
                     else:
                         column_config_dict[perf_col_name] = st.column_config.NumberColumn("今日至今持平率", format="%.2f%%")
                         
-                    st.dataframe(df_final, use_container_width=True, hide_index=True, column_config=column_config_dict)
+                    # 💡 核心修改：針對 50MA 乖離率過大 (>= 30%) 的列套用淡紅色底色警示
+                    def highlight_high_bias(row):
+                        # 建立一個與 row 同樣大小的空樣式列表
+                        style = [''] * len(row)
+                        # 找出 "50MA乖離率(%)" 欄位的索引位置
+                        if "50MA乖離率(%)" in row.index:
+                            bias_val = row["50MA乖離率(%)"]
+                            # 當乖離大於等於 30% 時，將整列的背景設為淺紅色，文字設為深紅色
+                            if bias_val >= 30.0:
+                                style = ['background-color: #ffcccc; color: #990000; font-weight: bold;'] * len(row)
+                        return style
+
+                    # 使用 Styler 處理表格樣式
+                    styled_df = df_final.style.apply(highlight_high_bias, axis=1)
+
+                    # 將套用好樣式的 styled_df 傳入 st.dataframe
+                    st.dataframe(styled_df, use_container_width=True, hide_index=True, column_config=column_config_dict)
                     
                     # 四象限戰略部署
                     st.divider()
