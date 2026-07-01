@@ -306,32 +306,35 @@ if submit_btn or st.session_state.first_run:
                                 cv_5_now = cv_5.iloc[-1]
                                 cv_5_ma20_now = cv_5_ma20.iloc[-1]
                                 is_vcp_dead_quiet = cv_5_now < cv_5_ma20_now * 0.50  # 🌟 補回：Dead Quiet (低於50%)
-                                is_vcp_80 = cv_5_now < cv_5_ma20_now * 0.80          # 80%+CV 壓縮
-                                is_vcp_90 = cv_5_now < cv_5_ma20_now * 0.90          # 90%+CV 壓縮
+                                is_vcp_80 = cv_5_now < cv_5_ma20_now * 0.80         # 80%+CV 壓縮
+                                is_vcp_90 = cv_5_now < cv_5_ma20_now * 0.90         # 90%+CV 壓縮
                         
-                        is_rs_leading = (not is_price_new_high) and is_alpha_new_high
-                        is_div_warning = is_price_new_high and is_alpha_lagging
+                            is_rs_leading = (not is_price_new_high) and is_alpha_new_high
+                            is_div_warning = is_price_new_high and is_alpha_lagging
+                            
+                            # 結構特徵分配
+                            if is_vcp_dead_quiet:
+                                struct_status = "💤 價格波動沉寂(Dead Quiet)"
+                            elif is_vcp_80:
+                                struct_status = "💎 極致壓縮(80%+CV)"
+                            elif is_vcp_90:
+                                struct_status = "🔥 相對壓縮(90%+CV)"
+                            elif is_rs_recovering:
+                                struct_status = "📈 動能回復中"
+                            else:
+                                struct_status = "⏳ 區間整理"
+                                
+                            # 領先與背離狀態首碼
+                            lead_prefix = ""
+                            if is_rs_leading:
+                                lead_prefix = "🌟 雙軌領先 | "
+                            elif is_div_warning:
+                                lead_prefix = "⚠️ 雙軌背離 | "
+                                
+                            vcp_status_final = lead_prefix + struct_status
                         
-                        # 結構特徵分配
-                        if is_vcp_dead_quiet:
-                            struct_status = "💤 價格波動沉寂(Dead Quiet)"
-                        elif is_vcp_80:
-                            struct_status = "💎 極致壓縮(80%+CV)"
-                        elif is_vcp_90:
-                            struct_status = "🔥 相對壓縮(90%+CV)"
-                        elif is_rs_recovering:
-                            struct_status = "📈 動能回復中"
                         else:
-                            struct_status = "⏳ 區間整理"
-                            
-                        # 領先與背離狀態首碼
-                        lead_prefix = ""
-                        if is_rs_leading:
-                            lead_prefix = "🌟 雙軌領先 | "
-                        elif is_div_warning:
-                            lead_prefix = "⚠️ 雙軌背離 | "
-                            
-                        vcp_status_final = lead_prefix + struct_status
+                            vcp_status_final = "⏳ 數據不足"
                         
                         # 依據判定結果在股票名稱前標記 ✅ 或 ❌，並在後方結合 VCP/動能 綜合狀態字串
                         display_name = f"✅ {stock['name']} 【{vcp_status_final}】" if is_trend_template else f"❌ {stock['name']} 【{vcp_status_final}】"
