@@ -306,7 +306,7 @@ if submit_btn or st.session_state.first_run:
                             struct_status = "💎 極致壓縮(80%+CV)"
                         elif is_vcp_90:
                             struct_status = "🔥 相對壓縮(90%+CV)"
-                        elif is_vcp_1y := is_rs_recovering:
+                        elif vcp_status_1y := is_rs_recovering:
                             struct_status = "📈 動能回復中"
                         else:
                             struct_status = "⏳ 區間整理"
