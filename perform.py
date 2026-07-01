@@ -279,6 +279,7 @@ if submit_btn or st.session_state.first_run:
                         is_alpha_lagging = False
                         is_vcp_80 = False
                         is_vcp_90 = False
+                        is_vcp_dead_quiet = False
                         is_rs_recovering = False
                         
                         if len(s_series_raw) >= 30:
@@ -304,14 +305,17 @@ if submit_btn or st.session_state.first_run:
                                 cv_5_ma20 = cv_5.rolling(20).mean()
                                 cv_5_now = cv_5.iloc[-1]
                                 cv_5_ma20_now = cv_5_ma20.iloc[-1]
-                                is_vcp_80 = cv_5_now < cv_5_ma20_now * 0.80
-                                is_vcp_90 = cv_5_now < cv_5_ma20_now * 0.90
+                                is_vcp_dead_quiet = cv_5_now < cv_5_ma20_now * 0.50  # 🌟 補回：Dead Quiet (低於50%)
+                                is_vcp_80 = cv_5_now < cv_5_ma20_now * 0.80          # 80%+CV 壓縮
+                                is_vcp_90 = cv_5_now < cv_5_ma20_now * 0.90          # 90%+CV 壓縮
                         
                         is_rs_leading = (not is_price_new_high) and is_alpha_new_high
                         is_div_warning = is_price_new_high and is_alpha_lagging
                         
                         # 結構特徵分配
-                        if is_vcp_80:
+                        if is_vcp_dead_quiet:
+                            struct_status = "💤 價格波動沉寂(Dead Quiet)"
+                        elif is_vcp_80:
                             struct_status = "💎 極致壓縮(80%+CV)"
                         elif is_vcp_90:
                             struct_status = "🔥 相對壓縮(90%+CV)"
@@ -398,6 +402,7 @@ if submit_btn or st.session_state.first_run:
                         🌀 VCP / 動能狀態動態標籤說明：
                         * 🌟 雙軌領先：個股股價尚未突破30日新高，但相對強度 (Alpha RS 曲線) 已率先刷新30日紀錄，暗示機構暗中強勢吃貨，極具爆發力。
                         * ⚠️ 雙軌背離：股價已創30日新高，但相對強度未同步創高，短線動能呈現隱形落後，需警惕高檔假突破。
+                        * 💤 價格波動沉寂(Dead Quiet)：5日價格變異係數收縮至20日均值的 50% 以下，代表波幅極限窄化，即將噴發大行情。
                         * 💎 極致壓縮(80%+CV)：5日價格變異係數收縮至20日均值的 80% 以下，籌碼極度洗淨，多空面臨臨界點。
                         * 🔥 相對壓縮(90%+CV)：5日價格變異係數收縮至20日均值的 90% 以下，進入標準 VCP 波幅收緊軌道。
                         * 📈 動能回復中：短線相對強度曲線扭轉下行趨勢、連續 3 日走揚，代表短期動能正由弱轉強。
