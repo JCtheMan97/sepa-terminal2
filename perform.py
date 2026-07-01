@@ -50,7 +50,7 @@ with st.expander("📖 閱讀 SEPA 系統核心心法 (Trade Like a Stock Market
     🎯 真正能創造數倍暴利的市場領導股（Market Leaders），通常具有以下三個特質：
     1. 在大盤中度修正時，它們跌得最少（甚至逆勢橫盤或創高）。
     2. 在大盤觸底時，它們是最先拔地而起、率先突破的個股。
-    3. 大盤的跌勢，是在幫這些強勢股清洗浮額（Weak hands），並讓其完美的 VCP（波動率收縮型態） 成型。
+    3. 大盤的跌勢，是在幫 these 強勢股清洗浮額（Weak hands），並讓其完美的 VCP（波動率收縮型態） 成型。
     """)
 
 st.markdown("""
@@ -154,7 +154,8 @@ if submit_btn or st.session_state.first_run:
                 # 核心改動：為了計算後續績效，下載範圍必須延伸到真正的今日 (real_today)
                 df_all = fetch_and_sync_data(tuple(all_tickers), start_date_long.strftime('%Y-%m-%d'), real_today.strftime('%Y-%m-%d'))
                 
-                df_adj = df_all['Adj Close'] if 'Adj Close' in df_all.columns.levels[0] else df_all['Close']
+                # 🛠️ 貼近 TradingView 核心修正 1：改以標準收盤價 'Close' 為準（僅調整股票股利/拆股，不扣除現金股利），完全對齊 TV 預設日線
+                df_adj = df_all['Close'] if 'Close' in df_all.columns.levels[0] else df_all['Adj Close']
                 
                 # 這裡過濾出回溯基準日前的歷史大盤數據，用作當時篩選的基準線
                 b_c_all = df_adj["0050.TW"].dropna()
@@ -175,10 +176,16 @@ if submit_btn or st.session_state.first_run:
                         idx_future = b_c_all.index[-1]
                         actual_holding_text = f"後續 {len(b_c_all) - 1 - loc_now} 個交易日 (資料庫極限至今日 {idx_future.strftime('%Y-%m-%d')})"
 
-                    # 大盤基準線
-                    idx_3m, idx_6m, idx_9m, idx_1y = b_c.index[-63], b_c.index[-126], b_c.index[-189], b_c.index[-252]
-                    b_now, b_3m, b_6m, b_9m, b_1y = b_c.loc[idx_now], b_c.loc[idx_3m], b_c.loc[idx_6m], b_c.loc[idx_9m], b_c.loc[idx_1y]
-                    benchmark_ibd_score = ((b_now/b_3m*2) + (b_now/b_6m) + (b_now/b_9m) + (b_now/b_1y)) / 5 * 100
+                    # 🛠️ 貼近 TradingView 核心修正 2：大盤基準線 IBD 分數改用純粹的 K 棒數量回溯（-63, -126...），對齊 Pine Script 的 bars 概念
+                    if len(b_c) >= 252:
+                        b_now_val = b_c.iloc[-1]
+                        b_3m_val = b_c.iloc[-63]
+                        b_6m_val = b_c.iloc[-126]
+                        b_9m_val = b_c.iloc[-189]
+                        b_1y_val = b_c.iloc[-252]
+                        benchmark_ibd_score = ((b_now_val/b_3m_val*2) + (b_now_val/b_6m_val) + (b_now_val/b_9m_val) + (b_now_val/b_1y_val)) / 5 * 100
+                    else:
+                        benchmark_ibd_score = 0.0
                     
                     # 短線照妖鏡
                     b_short_df = pd.DataFrame(b_c.loc[start_date_short.strftime('%Y-%m-%d'):])
@@ -201,7 +208,7 @@ if submit_btn or st.session_state.first_run:
                             skipped_stocks.append(stock["name"])
                             continue
                         
-                        # 🌟 貼近 TradingView 的核心改動：直接提取個股自身最原始、未包含聯合成份股 NaN 填充的純淨序列
+                        # 🌟 直接提取個股自身最原始、未包含聯合成份股 NaN 填充的純淨序列
                         s_series_raw_all = df_adj[ticker].dropna()
                         s_series_raw = s_series_raw_all.loc[:end_date.strftime('%Y-%m-%d')]
                         
@@ -211,7 +218,7 @@ if submit_btn or st.session_state.first_run:
                             
                         p_now = s_series_raw.iloc[-1]
                         
-                        # --- 🌟 貼近 TradingView 改動：在純淨的原生時間軸計算 50MA 與 乖離率 ---
+                        # --- 🌟 在純淨的原生時間軸計算 50MA 與 乖離率 ---
                         if len(s_series_raw) >= 50:
                             ma50_val = s_series_raw.rolling(window=50).mean().iloc[-1]
                             bias_50 = ((p_now - ma50_val) / ma50_val) * 100
@@ -227,10 +234,13 @@ if submit_btn or st.session_state.first_run:
                             m50 = sma50_s.iloc[-1]
                             m150 = sma150_s.iloc[-1]
                             m200 = sma200_s.iloc[-1]
-                            m200_22 = sma200_s.shift(22).iloc[-1] if len(sma200_s) > 22 else np.nan
                             
-                            h252 = s_series_raw.rolling(252, min_periods=1).max().iloc[-1]
-                            l252 = s_series_raw.rolling(252, min_periods=1).min().iloc[-1]
+                            # 🛠️ 貼近 TradingView 核心修正 3：m200_22 改採原生 K 線直接提取倒數第 23 根 K 棒，完美對齊 Pine Script 的 sma200[22]
+                            m200_22 = sma200_s.iloc[-23] if len(sma200_s) >= 23 else np.nan
+                            
+                            # 🛠️ 貼近 TradingView 核心修正 4：52週最高最低點改用原生 K 線最後 252 根 K 棒的 Max/Min，排除 calendar days 造成的雜訊
+                            h252 = s_series_raw.iloc[-252:].max() if len(s_series_raw) >= 252 else s_series_raw.max()
+                            l252 = s_series_raw.iloc[-252:].min() if len(s_series_raw) >= 252 else s_series_raw.min()
                             
                             cond1 = (p_now > m150) and (p_now > m200)
                             cond2 = m150 > m200
@@ -244,21 +254,19 @@ if submit_btn or st.session_state.first_run:
                         else:
                             is_trend_template = False
 
-                        # --- 🌟 相對強度指標（Alpha RS / IBD 分數 / 抗跌韌性）部分：對齊大盤基準線進行跨主體比對 ---
-                        s_series_aligned = s_series_raw.reindex(b_c.index).ffill()
-                        
-                        def get_v(s, idx): 
-                            valid = s.dropna()
-                            if valid.empty: return np.nan
-                            return valid.loc[valid.index[np.argmin(np.abs(valid.index - idx))]]
-                        
-                        s_n, s_3, s_6, s_9, s_1 = get_v(s_series_aligned, idx_now), get_v(s_series_aligned, idx_3m), get_v(s_series_aligned, idx_6m), get_v(s_series_aligned, idx_9m), get_v(s_series_aligned, idx_1y)
-                        
-                        if not pd.isna(s_n) and s_3 > 0 and s_6 > 0 and s_9 > 0 and s_1 > 0:
-                            ibd = ((s_n/s_3*2) + (s_n/s_6) + (s_n/s_9) + (s_n/s_1)) / 5 * 100
+                        # --- 🌟 🛠️ 貼近 TradingView 核心修正 5：個股 IBD 分數直接採用原生 K 線回溯第 63, 126, 189, 252 根棒子計算，同步 TV 核心公式
+                        if len(s_series_raw) >= 252:
+                            s_now_val = s_series_raw.iloc[-1]
+                            s_3m_val = s_series_raw.iloc[-63]
+                            s_6m_val = s_series_raw.iloc[-126]
+                            s_9m_val = s_series_raw.iloc[-189]
+                            s_1y_val = s_series_raw.iloc[-252]
+                            ibd = ((s_now_val/s_3m_val*2) + (s_now_val/s_6m_val) + (s_now_val/s_9m_val) + (s_now_val/s_1y_val)) / 5 * 100
                         else:
                             ibd = 0.0
                         
+                        # 短線照妖鏡需要與大盤恐慌日進行對齊比對
+                        s_series_aligned = s_series_raw.reindex(b_c.index).ffill()
                         s_ret = s_series_aligned.pct_change() * 100
                         outperform = np.sum(s_ret.reindex(panic_dates_list) > b_short_df.loc[panic_dates_list, 'Market_Return'])
                         resilience = (outperform / total_panic_days * 100) if total_panic_days > 0 else 100
@@ -273,13 +281,14 @@ if submit_btn or st.session_state.first_run:
                         is_vcp_90 = False
                         is_rs_recovering = False
                         
-                        if len(s_series_aligned.dropna()) >= 30:
-                            valid_aligned = s_series_aligned.dropna()
-                            same_idx_b = b_c.reindex(valid_aligned.index).ffill()
-                            rel_close = valid_aligned / same_idx_b
+                        if len(s_series_raw) >= 30:
+                            # 🛠️ 貼近 TradingView 核心修正 6：相對強弱線 (Relative RS) 的計算，改以「個股原生時間軸」反向對齊大盤
+                            # 這能完全精準模擬 Pine Script 在個股圖表上使用 request.security("0050", timeframe.period) 的對齊邏輯
+                            b_c_aligned_to_stock = b_c_all.reindex(s_series_raw.index).ffill()
+                            rel_close = s_series_raw / b_c_aligned_to_stock
                             
-                            # 雙軌領先/背離偵測 (以30日為基準軸)
-                            is_price_new_high = p_now >= valid_aligned.iloc[-31:-1].max()
+                            # 雙軌領先/背離偵測 (完全以個股原生交易日之 30 根 K 棒為基準軸)
+                            is_price_new_high = p_now >= s_series_raw.iloc[-31:-1].max()
                             is_alpha_new_high = rel_close.iloc[-1] >= rel_close.iloc[-31:-1].max()
                             is_alpha_lagging = rel_close.iloc[-1] < rel_close.iloc[-31:-1].max()
                             
@@ -288,8 +297,8 @@ if submit_btn or st.session_state.first_run:
                                 is_rs_recovering = rel_close.iloc[-1] > rel_close.iloc[-2] and rel_close.iloc[-2] > rel_close.iloc[-3]
                             
                             # VCP 緊縮指標量化計算 (5日價格波動度 / 20日均值)
-                            roll_std5 = valid_aligned.rolling(5).std()
-                            roll_mean5 = valid_aligned.rolling(5).mean()
+                            roll_std5 = s_series_raw.rolling(5).std()
+                            roll_mean5 = s_series_raw.rolling(5).mean()
                             cv_5 = roll_std5 / roll_mean5
                             if len(cv_5) >= 20:
                                 cv_5_ma20 = cv_5.rolling(20).mean()
