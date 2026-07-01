@@ -48,9 +48,9 @@ with st.expander("📖 閱讀 SEPA 系統核心心法 (Trade Like a Stock Market
     大盤修正（Market Correction）或熊市，正是篩選「下一波超級飆股（Next Superperformers）」的黃金時間。當平庸的投資人因恐慌而遠離市場時，我們必須密切緊盯那些「抗跌並拒絕下跌」的個股，因為這正代表了機構法人正在瘋狂暗中吃貨。
 
     🎯 真正能創造數倍暴利的市場領導股（Market Leaders），通常具有以下三個特質：
-    1. 在大盤中度修正時，它們跌得最少（甚至逆勢橫盤或創高）。
+    1. 在大盤中度修正時，它們跌得最少（甚至逆勢橫盤 or 創高）。
     2. 在大盤觸底時，它們是最先拔地而起、率先突破的個股。
-    3. 大盤的跌勢，是在幫這些強勢股清洗浮額（Weak hands），並讓其完美的 VCP（波動率收縮型態） 成型。
+    3. 大盤的跌勢，是在幫 these 強勢股清洗浮額（Weak hands），並讓其完美的 VCP（波動率收縮型態） 成型。
     """)
 
 st.markdown("""
@@ -151,8 +151,9 @@ if submit_btn or st.session_state.first_run:
             else:
                 all_tickers = ["0050.TW"] + [stock["id"] for stock in STOCKS_POOL]
                 
-                # 核心改動：為了計算後續績效，下載範圍必須延伸到真正的今日 (real_today)
-                df_all = fetch_and_sync_data(tuple(all_tickers), start_date_long.strftime('%Y-%m-%d'), real_today.strftime('%Y-%m-%d'))
+                # 🛠️ 核心修正 1：加上強制 +1 天位移，防止 yfinance 底層 Exclusive 機制吃掉最新一根 K 棒
+                download_end_date = real_today + timedelta(days=1)
+                df_all = fetch_and_sync_data(tuple(all_tickers), start_date_long.strftime('%Y-%m-%d'), download_end_date.strftime('%Y-%m-%d'))
                 
                 # 🛠️ 貼近 TradingView 核心修正 1：改以標準收盤價 'Close' 為準（僅調整股票股利/拆股，不扣除現金股利），完全對齊 TV 預設日線
                 df_adj = df_all['Close'] if 'Close' in df_all.columns.levels[0] else df_all['Adj Close']
@@ -176,13 +177,13 @@ if submit_btn or st.session_state.first_run:
                         idx_future = b_c_all.index[-1]
                         actual_holding_text = f"後續 {len(b_c_all) - 1 - loc_now} 個交易日 (資料庫極限至今日 {idx_future.strftime('%Y-%m-%d')})"
 
-                    # 🛠️ 貼近 TradingView 核心修正 2：大盤基準線 IBD 分數改用純粹的 K 棒數量回溯（-63, -126...），對齊 Pine Script 的 bars 概念
-                    if len(b_c) >= 252:
+                    # 🛠️ 貼近 TradingView 核心修正 2：大盤基準線 IBD 全面校正為 -64, -127, -190, -253 消除 Off-by-one 偏差，精準還原 Pine Script 的 bars 概念
+                    if len(b_c) >= 253:
                         b_now_val = b_c.iloc[-1]
-                        b_3m_val = b_c.iloc[-63]
-                        b_6m_val = b_c.iloc[-126]
-                        b_9m_val = b_c.iloc[-189]
-                        b_1y_val = b_c.iloc[-252]
+                        b_3m_val = b_c.iloc[-64]
+                        b_6m_val = b_c.iloc[-127]
+                        b_9m_val = b_c.iloc[-190]
+                        b_1y_val = b_c.iloc[-253]
                         benchmark_ibd_score = ((b_now_val/b_3m_val*2) + (b_now_val/b_6m_val) + (b_now_val/b_9m_val) + (b_now_val/b_1y_val)) / 5 * 100
                     else:
                         benchmark_ibd_score = 0.0
@@ -254,20 +255,19 @@ if submit_btn or st.session_state.first_run:
                         else:
                             is_trend_template = False
 
-                        # --- 🌟 🛠️ 貼近 TradingView 核心修正 5：個股 IBD 分數直接採用原生 K 線回溯第 63, 126, 189, 252 根棒子計算，同步 TV 核心公式
-                        if len(s_series_raw) >= 252:
+                        # --- 🌟 🛠️ 貼近 TradingView 核心修正 5：個股 IBD 全面校正為 -64, -127, -190, -253 根棒子計算，同步 TV 核心公式
+                        if len(s_series_raw) >= 253:
                             s_now_val = s_series_raw.iloc[-1]
-                            s_3m_val = s_series_raw.iloc[-63]
-                            s_6m_val = s_series_raw.iloc[-126]
-                            s_9m_val = s_series_raw.iloc[-189]
-                            s_1y_val = s_series_raw.iloc[-252]
+                            s_3m_val = s_series_raw.iloc[-64]
+                            s_6m_val = s_series_raw.iloc[-127]
+                            s_9m_val = s_series_raw.iloc[-190]
+                            s_1y_val = s_series_raw.iloc[-253]
                             ibd = ((s_now_val/s_3m_val*2) + (s_now_val/s_6m_val) + (s_now_val/s_9m_val) + (s_now_val/s_1y_val)) / 5 * 100
                         else:
                             ibd = 0.0
                         
-                        # 短線照妖鏡需要與大盤恐慌日進行對齊比對
-                        s_series_aligned = s_series_raw.reindex(b_c.index).ffill()
-                        s_ret = s_series_aligned.pct_change() * 100
+                        # 🛠️ 核心修正 4：直接計算個股原生 K 線的實際漲跌幅後對齊大盤恐慌日，移除 ffill 盲點，絕不產生虛擬持平回報
+                        s_ret = s_series_raw.pct_change() * 100
                         outperform = np.sum(s_ret.reindex(panic_dates_list) > b_short_df.loc[panic_dates_list, 'Market_Return'])
                         resilience = (outperform / total_panic_days * 100) if total_panic_days > 0 else 100
                         
@@ -296,8 +296,8 @@ if submit_btn or st.session_state.first_run:
                             if len(rel_close) >= 3:
                                 is_rs_recovering = rel_close.iloc[-1] > rel_close.iloc[-2] and rel_close.iloc[-2] > rel_close.iloc[-3]
                             
-                            # VCP 緊縮指標量化計算 (5日價格波動度 / 20日均值)
-                            roll_std5 = s_series_raw.rolling(5).std()
+                            # 🛠️ 核心修正 3：明確加入 ddof=0 參數採用母體標準差計算，完美同步 Pine Script 預設 ta.stdev() 邏輯
+                            roll_std5 = s_series_raw.rolling(5).std(ddof=0)
                             roll_mean5 = s_series_raw.rolling(5).mean()
                             cv_5 = roll_std5 / roll_mean5
                             if len(cv_5) >= 20:
