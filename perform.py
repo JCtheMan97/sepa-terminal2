@@ -67,7 +67,7 @@ with st.sidebar.form("sepa_integrated_form"):
     default_pool = (
         "2337.TW,旺宏\n3406.TW,玉晶光\n3550.TW,聯穎\n6187.TWO,萬潤\n3037.TW,欣興\n3017.TW,奇鋐\n"
         "8086.TWO,宏捷科\n4749.TWO,新應材\n3680.TWO,家登\n8021.TW,尖點\n3481.TW,群創\n"
-        "8438.TW,昶昕\n3691.TWO,碩禾\n2423.TW,固緯\n8147.TWO,正淩\n5284.TW,JPP-KY\n"
+        "8438.TW,昶昕\n3691.TWO,碩禾\n2423.TW,固緯\n8147.TWO,正淩\n5284.TWO,JPP-KY\n"
         "2493.TW,揚博\n3023.TW,信邦\n6672.TW,騰輝電子\n3044.TW,健鼎\n6134.TWO,萬旭\n2413.TW,環科\n3577.TWO,泓格\n3305.TW,昇貿"
     )
     stock_input = st.text_area("股票清單 (支援複製貼上！系統會自動過濾國籍、財報等非代號雜訊)", value=default_pool, height=300)
@@ -155,6 +155,7 @@ if submit_btn or st.session_state.first_run:
                 
                 # 🛠️ 貼近 TradingView 核心修正 1：改以標準收盤價 'Close' 為準（僅調整股票股利/拆股，不扣除現金股利），完全對齊 TV 預設日線
                 df_adj = df_all['Close'] if 'Close' in df_all.columns.levels[0] else df_all['Adj Close']
+                df_vol = df_all['Volume'] # 提取成交量
                 
                 # 這裡過濾出回溯基準日前的歷史大盤數據，用作當時篩選的基準線
                 b_c_all = df_adj["0050.TW"].dropna()
@@ -210,6 +211,10 @@ if submit_btn or st.session_state.first_run:
                         # 🌟 直接提取個股自身最原始、未包含聯合成份股 NaN 填充的純淨序列
                         s_series_raw_all = df_adj[ticker].dropna()
                         s_series_raw = s_series_raw_all.loc[:end_date.strftime('%Y-%m-%d')]
+                        
+                        # 同步提取成交量
+                        v_series_raw_all = df_vol[ticker].dropna()
+                        v_series_raw = v_series_raw_all.loc[:end_date.strftime('%Y-%m-%d')]
                         
                         if s_series_raw.empty:
                             skipped_stocks.append(stock["name"])
@@ -271,7 +276,7 @@ if submit_btn or st.session_state.first_run:
                         
                         # ==========================================
                         # 💡 【核心整合】原第 11 欄：VCP 與 動能狀態判定 💡
-                        # 🛠️ 修正重點：強制使用 ddof=0 以對齊 Pine Script 的 ta.stdev
+                        # 🛠️ 修正：引入 Volume 比對以對齊 TradingView 指標
                         # ==========================================
                         is_price_new_high = False
                         is_alpha_new_high = False
@@ -293,17 +298,24 @@ if submit_btn or st.session_state.first_run:
                                 is_rs_recovering = rel_close.iloc[-1] > rel_close.iloc[-2] and rel_close.iloc[-2] > rel_close.iloc[-3]
                             
                             # 🛠️ [關鍵修正] 使用 ddof=0 嚴格對齊 Pine Script 的 ta.stdev
-                            # 這是修正 "Dead Quiet" 誤判的關鍵邏輯
                             roll_std5 = s_series_raw.rolling(5).std(ddof=0)
                             roll_mean5 = s_series_raw.rolling(5).mean()
                             cv_5 = roll_std5 / roll_mean5
                             
+                            # 🛠️ [關鍵修正] 同步計算 Volume 以對齊 Pine Script 的 is_quiet_platform
+                            if len(v_series_raw) >= 20:
+                                vol_sma3 = v_series_raw.rolling(3).mean().iloc[-1]
+                                vol_sma20 = v_series_raw.rolling(20).mean().iloc[-1]
+                                is_vol_quiet = vol_sma3 < (vol_sma20 * 0.7)
+                            else:
+                                is_vol_quiet = False
+
                             if len(cv_5) >= 20:
                                 cv_5_ma20 = cv_5.rolling(20).mean()
                                 cv_5_now = cv_5.iloc[-1]
                                 cv_5_ma20_now = cv_5_ma20.iloc[-1]
                                 
-                                is_vcp_dead_quiet = cv_5_now < cv_5_ma20_now * 0.50
+                                is_vcp_dead_quiet = is_vol_quiet and (cv_5_now < cv_5_ma20_now * 0.80)
                                 is_vcp_80 = cv_5_now < cv_5_ma20_now * 0.80
                                 is_vcp_90 = cv_5_now < cv_5_ma20_now * 0.90
                         
@@ -391,7 +403,7 @@ if submit_btn or st.session_state.first_run:
                         🌀 VCP / 動能狀態動態標籤說明：
                         * 🌟 雙軌領先：個股股價尚未突破30日新高，但相對強度 (Alpha RS 曲線) 已率先刷新30日紀錄，暗示機構暗中強勢吃貨，極具爆發力。
                         * ⚠️ 雙軌背離：股價已創30日新高，但相對強度未同步創高，短線動能呈現隱形落後，需警惕高檔假突破。
-                        * 💤 價格波動沉寂(Dead Quiet)：5日價格變異係數收縮至20日均值的 50% 以下，代表波幅極限窄化，即將噴發大行情。
+                        * 💤 價格波動沉寂(Dead Quiet)：成交量縮至 20 日均值 70% 以下，且 5日價格變異係數收縮，代表波幅極限窄化，即將噴發大行情。
                         * 💎 極致壓縮(80%+CV)：5日價格變異係數收縮至20日均值的 80% 以下，籌碼極度洗淨，多空面臨臨界點。
                         * 🔥 相對壓縮(90%+CV)：5日價格變異係數收縮至20日均值的 90% 以下，進入標準 VCP 波幅收緊軌道。
                         * 📈 動能回復中：短線相對強度曲線扭轉下行趨勢、連續 3 日走揚。
