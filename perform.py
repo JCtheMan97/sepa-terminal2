@@ -587,49 +587,49 @@ if submit_btn or st.session_state.first_run:
                     laggards = df_final[(df_final["對比 0050 超額強度"] <= 0) & (df_final["短線抗跌韌性分數"] < dynamic_threshold)]
                     
                     # --- 核心修改：強制換行格式，確保處置狀態與報酬顯示在下方 ---
-def format_stocks(df, show_perf=False, is_backtesting=False):
-    if df.empty:
-        return "無"
-    lines = []
-    for _, row in df.iterrows():
-        # 1. 乖離率處理
-        bias_val = row['50MA乖離率(%)']
-        if bias_val >= 30.0:
-            bias_str = f"<span style='background-color: #ffcccc; color: #990000; padding: 2px 4px; border-radius: 4px; font-weight: bold;'>{bias_val:.1f}%</span>"
-        else:
-            bias_str = f"{bias_val:.1f}%"
+                    def format_stocks(df, show_perf=False, is_backtesting=False):
+                        if df.empty:
+                            return "無"
+                        lines = []
+                        for _, row in df.iterrows():
+                            # 1. 乖離率處理
+                            bias_val = row['50MA乖離率(%)']
+                            if bias_val >= 30.0:
+                                bias_str = f"<span style='background-color: #ffcccc; color: #990000; padding: 2px 4px; border-radius: 4px; font-weight: bold;'>{bias_val:.1f}%</span>"
+                            else:
+                                bias_str = f"{bias_val:.1f}%"
 
-        # 2. 準備額外資訊 (Perf + Disposition)
-        extra_info_list = []
+                            # 2. 準備額外資訊 (Perf + Disposition)
+                            extra_info_list = []
         
-        # 報酬率
-        if show_perf and perf_col_name in row:
-            extra_info_list.append(f"➡️ 後續報酬: {row[perf_col_name]:.1f}%")
+                            # 報酬率
+                            if show_perf and perf_col_name in row:
+                            extra_info_list.append(f"➡️ 後續報酬: {row[perf_col_name]:.1f}%")
         
-        # 處置股標記
-        disp_info = DISPOSITION_MAP.get(row['股票代號'])
-        if disp_info and not is_backtesting:
-            period_text = f" ({disp_info['period']})" if disp_info.get('period') else ""
-            disp_str = (
-                f"<span style='background-color: #fff1f0; color: #e74c3c; border: 1px solid #ffbaba; "
-                f"padding: 2px 6px; border-radius: 6px; font-size: 0.85em; font-weight: 600; "
-                f"box-shadow: 0 1px 2px rgba(0,0,0,0.05);'>"
-                f"🚨 處置中{period_text}</span>"
-            )
-            extra_info_list.append(disp_str)
+                            # 處置股標記
+                            disp_info = DISPOSITION_MAP.get(row['股票代號'])
+                            if disp_info and not is_backtesting:
+                                period_text = f" ({disp_info['period']})" if disp_info.get('period') else ""
+                                disp_str = (
+                                    f"<span style='background-color: #fff1f0; color: #e74c3c; border: 1px solid #ffbaba; "
+                                    f"padding: 2px 6px; border-radius: 6px; font-size: 0.85em; font-weight: 600; "
+                                    f"box-shadow: 0 1px 2px rgba(0,0,0,0.05);'>"
+                                    f"🚨 處置中{period_text}</span>"
+                                )
+                                extra_info_list.append(disp_str)
 
-        # 3. 組合主標題
-        formatted_name = f"{row['趨勢模板']} {row['原始名稱']} 【{row['動能狀態判定']}】"
-        main_line = f"* {formatted_name} ({bias_str})"
+                            # 3. 組合主標題
+                            formatted_name = f"{row['趨勢模板']} {row['原始名稱']} 【{row['動能狀態判定']}】"
+                            main_line = f"* {formatted_name} ({bias_str})"
         
-        # 4. 如果有額外資訊，強制換行顯示在下方
-        if extra_info_list:
-            extra_line = f"<br>&nbsp;&nbsp;&nbsp;&nbsp;<small style='color: #666;'>{' | '.join(extra_info_list)}</small>"
-            lines.append(f"{main_line}{extra_line}")
-        else:
-            lines.append(main_line)
+                            # 4. 如果有額外資訊，強制換行顯示在下方
+                            if extra_info_list:
+                                extra_line = f"<br>&nbsp;&nbsp;&nbsp;&nbsp;<small style='color: #666;'>{' | '.join(extra_info_list)}</small>"
+                                lines.append(f"{main_line}{extra_line}")
+                            else:
+                                lines.append(main_line)
             
-    return "\n".join(lines)
+                    return "\n".join(lines)
 
 # --- 顯示區塊 (確保所有參數都帶上關鍵字，解決 SyntaxError) ---
 c1, c2 = st.columns(2)
