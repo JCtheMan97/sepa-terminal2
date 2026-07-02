@@ -12,6 +12,10 @@ import os
 
 import re
 
+import requests
+
+from io import StringIO
+
 
 
 # 1. 網頁初始設定
@@ -71,6 +75,176 @@ def fetch_and_sync_data(tickers, start_date, end_date):
     df_all = yf.download(tickers, start=start_date, end=end_date, progress=False, auto_adjust=False)
 
     return df_all
+
+
+
+# --- 🆕 處置股查詢引擎 (上市 TWSE + 上櫃 TPEx) ---
+
+def _format_disposition_period(period_str):
+
+    """將民國年『處置起迄時間』轉換為西元年字串，例如 115/06/02～115/06/15 -> 2026/06/02~2026/06/15"""
+
+    try:
+
+        cleaned = str(period_str).replace('～', '~').replace('－', '~').strip()
+
+        parts = [p.strip() for p in cleaned.split('~') if p.strip()]
+
+        formatted = []
+
+        for p in parts:
+
+            y, m, d = p.split('/')
+
+            formatted.append(f"{int(y) + 1911}/{int(m):02d}/{int(d):02d}")
+
+        return "~".join(formatted) if formatted else cleaned
+
+    except Exception:
+
+        return str(period_str)
+
+
+
+@st.cache_data(ttl=1800)  # 處置公告每日更新，快取30分鐘
+
+def fetch_disposition_data():
+
+    """
+
+    自動抓取『目前處於處置中』的個股清單 (含處置起迄時間)。
+
+    資料來源：
+
+      - 上市 (TWSE)：https://www.twse.com.tw/announcement/punish
+
+      - 上櫃 (TPEx)：https://www.tpex.org.tw/web/bulletin/disposal_information/disposal_information.php
+
+    回傳格式： { "股票代號(不含.TW/.TWO)": {"period": "西元年區間字串", "measure": "處置措施", "market": "上市/上櫃"} }
+
+    """
+
+    disposition_map = {}
+
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+
+
+    # --- 上市 (TWSE) ---
+
+    try:
+
+        url_twse = "https://www.twse.com.tw/announcement/punish?response=html"
+
+        resp = requests.get(url_twse, headers=headers, timeout=10)
+
+        resp.encoding = "utf-8"
+
+        tables = pd.read_html(StringIO(resp.text))
+
+        if tables:
+
+            df_disp = tables[0]
+
+            code_col = next((c for c in df_disp.columns if "證券代號" in str(c)), None)
+
+            period_col = next((c for c in df_disp.columns if "起迄" in str(c)), None)
+
+            measure_col = next((c for c in df_disp.columns if "處置措施" in str(c)), None)
+
+            if code_col and period_col:
+
+                for _, row in df_disp.iterrows():
+
+                    try:
+
+                        code = str(row[code_col]).strip()
+
+                        period = str(row[period_col]).strip()
+
+                        measure = str(row[measure_col]).strip() if measure_col else ""
+
+                        if code and code.lower() != "nan" and code not in disposition_map:
+
+                            disposition_map[code] = {
+
+                                "period": _format_disposition_period(period),
+
+                                "measure": measure,
+
+                                "market": "上市",
+
+                            }
+
+                    except Exception:
+
+                        continue
+
+    except Exception:
+
+        pass
+
+
+
+    # --- 上櫃 (TPEx) ---
+
+    try:
+
+        url_tpex = "https://www.tpex.org.tw/web/bulletin/disposal_information/disposal_information.php?l=zh-tw"
+
+        resp2 = requests.get(url_tpex, headers=headers, timeout=10)
+
+        resp2.encoding = "utf-8"
+
+        tables2 = pd.read_html(StringIO(resp2.text))
+
+        for t in tables2:
+
+            code_col = next((c for c in t.columns if "證券代號" in str(c) or "股票代號" in str(c)), None)
+
+            if not code_col:
+
+                continue
+
+            period_col = next((c for c in t.columns if "起迄" in str(c) or "期間" in str(c)), None)
+
+            measure_col = next((c for c in t.columns if "措施" in str(c)), None)
+
+            for _, row in t.iterrows():
+
+                try:
+
+                    code = str(row[code_col]).strip()
+
+                    period = str(row[period_col]).strip() if period_col else ""
+
+                    measure = str(row[measure_col]).strip() if measure_col else ""
+
+                    if code and code.lower() != "nan" and code not in disposition_map:
+
+                        disposition_map[code] = {
+
+                            "period": _format_disposition_period(period),
+
+                            "measure": measure,
+
+                            "market": "上櫃",
+
+                        }
+
+                except Exception:
+
+                    continue
+
+            break  # 找到含證券代號欄位的表格後即可跳出
+
+    except Exception:
+
+        pass
+
+
+
+    return disposition_map
 
 
 
@@ -818,6 +992,8 @@ if submit_btn or st.session_state.first_run:
 
                         * ⏳ 區間整理：股價與動能處於正常箱型、橫盤 or 洗盤沉澱階段，未出現極端信號。
 
+                        * 🚫 處置中：代表該股目前正處於證交所/櫃買中心公布的「處置」交易期間，將附上處置起迄時間，請留意人工管制撮合、預收款券等交易限制。
+
                         """)
 
                     
@@ -858,7 +1034,21 @@ if submit_btn or st.session_state.first_run:
 
                     st.subheader("🏁 Mark Minervini 流派：雙軌交叉戰略部署")
 
-                    st.caption(f"💡 註：括號內為 50MA 乖離率(%)。右側標註為【後續 {holding_days} 日回測實際報酬率】。")
+                    st.caption(f"💡 註：括號內為 50MA 乖離率(%)，緊接其後若標示 🚫處置中(起迄日) 代表該股目前正被交易所列為處置股。右側標註為【後續 {holding_days} 日回測實際報酬率】。")
+
+                    
+
+                    # 🆕 抓取目前處置中個股清單 (上市 TWSE + 上櫃 TPEx)
+
+                    with st.spinner("🚨 正在同步證交所/櫃買中心處置股公告..."):
+
+                        DISPOSITION_MAP = fetch_disposition_data()
+
+                    if DISPOSITION_MAP:
+
+                        st.sidebar.caption(f"🚨 處置股監控：目前偵測到 {len(DISPOSITION_MAP):,} 檔全市場處置中證券")
+
+                    
 
                     true_leaders = df_final[(df_final["對比 0050 超額強度"] > 0) & (df_final["短線抗跌韌性分數"] >= dynamic_threshold)]
 
@@ -884,9 +1074,31 @@ if submit_btn or st.session_state.first_run:
 
                             bias_str = f"<span style='background-color: #ffcccc; color: #990000; padding: 2px 4px; border-radius: 4px; font-weight: bold;'>{bias_val:.1f}%</span>" if bias_val >= 30.0 else f"{bias_val:.1f}%"
 
+
+
+                            # 🆕 處置股狀態標記 (置於 50MA乖離率 之後)
+
+                            disp_info = DISPOSITION_MAP.get(row['股票代號'])
+
+                            if disp_info:
+
+                                disp_str = (
+
+                                    f" <span style='background-color:#ff4d4d; color:white; padding:2px 6px; "
+
+                                    f"border-radius:4px; font-weight:bold;'>🚫處置中({disp_info['period']})</span>"
+
+                                )
+
+                            else:
+
+                                disp_str = ""
+
+
+
                             formatted_name = f"{row['趨勢模板']} {row['原始名稱']} 【{row['動能狀態判定']}】"
 
-                            lines.append(f"* {formatted_name} ({bias_str}){perf_str}")
+                            lines.append(f"* {formatted_name} ({bias_str}){disp_str}{perf_str}")
 
                         return "\n".join(lines)
 
@@ -906,5 +1118,4 @@ if submit_btn or st.session_state.first_run:
 
         except Exception as e:
 
-            st.error(f"數據錯誤: {e}") 
-
+            st.error(f"數據錯誤: {e}")
