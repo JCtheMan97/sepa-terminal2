@@ -598,14 +598,14 @@ if submit_btn or st.session_state.first_run:
                                 bias_str = f"<span style='background-color: #ffcccc; color: #990000; padding: 2px 4px; border-radius: 4px; font-weight: bold;'>{bias_val:.1f}%</span>"
                             else:
                                 bias_str = f"{bias_val:.1f}%"
-
+                    
                             # 2. 準備額外資訊 (Perf + Disposition)
                             extra_info_list = []
-        
+                            
                             # 報酬率
                             if show_perf and perf_col_name in row:
-                            extra_info_list.append(f"➡️ 後續報酬: {row[perf_col_name]:.1f}%")
-        
+                                extra_info_list.append(f"➡️ 後續報酬: {row[perf_col_name]:.1f}%")
+                            
                             # 處置股標記
                             disp_info = DISPOSITION_MAP.get(row['股票代號'])
                             if disp_info and not is_backtesting:
@@ -617,35 +617,35 @@ if submit_btn or st.session_state.first_run:
                                     f"🚨 處置中{period_text}</span>"
                                 )
                                 extra_info_list.append(disp_str)
-
+                    
                             # 3. 組合主標題
                             formatted_name = f"{row['趨勢模板']} {row['原始名稱']} 【{row['動能狀態判定']}】"
                             main_line = f"* {formatted_name} ({bias_str})"
-        
+                            
                             # 4. 如果有額外資訊，強制換行顯示在下方
                             if extra_info_list:
                                 extra_line = f"<br>&nbsp;&nbsp;&nbsp;&nbsp;<small style='color: #666;'>{' | '.join(extra_info_list)}</small>"
                                 lines.append(f"{main_line}{extra_line}")
                             else:
                                 lines.append(main_line)
-            
-                    return "\n".join(lines)
-
-            # --- 顯示區塊 (確保所有參數都帶上關鍵字，解決 SyntaxError) ---
-            c1, c2 = st.columns(2)
-
-            c1.success(f"### 👑 第一象限：逆風真龍頭 ({len(true_leaders)} 檔)")
-            c1.markdown(format_stocks(true_leaders, show_perf=True, is_backtesting=is_backtesting), unsafe_allow_html=True)
-            c1.caption("👉 戰略部署：長線動能擊敗大盤，且短線抗跌表現達到當前動態合格線以上。隨時注意 VCP 出量突破。")
-
-            c1.info(f"### 🚀 第二象限：高 Beta 攻擊兵 ({len(momentum_only)} 檔)")
-            c1.markdown(format_stocks(momentum_only, show_perf=True, is_backtesting=is_backtesting), unsafe_allow_html=True)
-            c1.caption("👉 戰略部署：長線極強，但修正波動高於大盤. 一旦大盤止穩，這群股票往往是右側出量追擊的首選。")
-
-            c2.warning(f"### 🛡️ 第三象限：資金避風港 ({len(defensive_only)} 檔)")
-            c2.markdown(format_stocks(defensive_only, show_perf=True, is_backtesting=is_backtesting), unsafe_allow_html=True)
-            c2.caption("👉 戰略部署：短線極度抗跌，長線動能尚未完全追上。若有打底完成標的，高抗跌意味主力在低檔死守，值得關注！")
-
-            c2.error(f"### 🚨 第四象限：無情剔除名單 ({len(laggards)} 檔)")
-            c2.markdown(format_stocks(laggards, show_perf=True, is_backtesting=is_backtesting), unsafe_allow_html=True)
-            c2.caption("👉 戰略部署：長短線皆跑輸大盤，在馬克系統中屬於弱勢標的，建議審慎評估資金配置與汰弱留強。")
+                                
+                        return "\n".join(lines)
+                    
+                    # --- 顯示區塊 (確保所有參數都帶上關鍵字，解決 SyntaxError) ---
+                    c1, c2 = st.columns(2)
+                    
+                    c1.success(f"### 👑 第一象限：逆風真龍頭 ({len(true_leaders)} 檔)")
+                    c1.markdown(format_stocks(true_leaders, show_perf=True, is_backtesting=is_backtesting), unsafe_allow_html=True)
+                    c1.caption("👉 戰略部署：長線動能擊敗大盤，且短線抗跌表現達到當前動態合格線以上。隨時注意 VCP 出量突破。")
+                    
+                    c1.info(f"### 🚀 第二象限：高 Beta 攻擊兵 ({len(momentum_only)} 檔)")
+                    c1.markdown(format_stocks(momentum_only, show_perf=True, is_backtesting=is_backtesting), unsafe_allow_html=True)
+                    c1.caption("👉 戰略部署：長線極強，但修正波動高於大盤. 一旦大盤止穩，這群股票往往是右側出量追擊的首選。")
+                    
+                    c2.warning(f"### 🛡️ 第三象限：資金避風港 ({len(defensive_only)} 檔)")
+                    c2.markdown(format_stocks(defensive_only, show_perf=True, is_backtesting=is_backtesting), unsafe_allow_html=True)
+                    c2.caption("👉 戰略部署：短線極度抗跌，長線動能尚未完全追上。若有打底完成標的，高抗跌意味主力在低檔死守，值得關注！")
+                    
+                    c2.error(f"### 🚨 第四象限：無情剔除名單 ({len(laggards)} 檔)")
+                    c2.markdown(format_stocks(laggards, show_perf=True, is_backtesting=is_backtesting), unsafe_allow_html=True)
+                    c2.caption("👉 戰略部署：長短線皆跑輸大盤，在馬克系統中屬於弱勢標的，建議審慎評估資金配置與汰弱留強。")
