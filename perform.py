@@ -5,9 +5,49 @@ import yfinance as yf
 from datetime import datetime, timedelta
 import os
 import re
+import requests  # 🆕 新增：用於自動抓取證交所API
 
 # 1. 網頁初始設定
 st.set_page_config(page_title="🏆 SEPA 雙軌強勢股終端機", layout="wide")
+
+# 🆕 新增：自動抓取上市櫃處置股 API (OpenAPI)
+@st.cache_data(ttl=3600)  # 快取1小時，避免頻繁請求官方API
+def get_disposition_stocks():
+    disposition_map = {}
+    
+    def format_roc_date(d_str):
+        """將民國年 1130614 轉為 113/06/14 方便閱讀"""
+        d_str = str(d_str).strip()
+        if len(d_str) == 7:
+            return f"{d_str[:3]}/{d_str[3:5]}/{d_str[5:]}"
+        return d_str
+
+    try:
+        # 1. 抓取上市處置股 (TWSE OpenAPI)
+        res_twse = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/TWT84U", timeout=10)
+        if res_twse.status_code == 200:
+            for item in res_twse.json():
+                code = str(item.get('Code', '')).strip()
+                start = item.get('Disp_Start', '')
+                end = item.get('Disp_End', '')
+                if code:
+                    disposition_map[code] = f"{format_roc_date(start)} - {format_roc_date(end)}"
+                    
+        # 2. 抓取上櫃處置股 (TPEx OpenAPI)
+        res_tpex = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_disposition_securities", timeout=10)
+        if res_tpex.status_code == 200:
+            for item in res_tpex.json():
+                code = str(item.get('SecuritiesCompanyCode', '')).strip()
+                start = item.get('DispositionStart', '')
+                end = item.get('DispositionEnd', '')
+                if code:
+                    disposition_map[code] = f"{format_roc_date(start)} - {format_roc_date(end)}"
+    except Exception as e:
+        pass # 若 API 異常則忽略，不影響主程式運行
+        
+    return disposition_map
+
+DISPOSITION_STOCKS = get_disposition_stocks()
 
 # 2. 自動載入後台字典 (相容 UTF-8-sig)
 @st.cache_data
@@ -26,17 +66,6 @@ def load_stock_dict():
         except Exception as e:
             st.sidebar.error(f"系統資料庫讀取失敗: {e}")
     return stock_dict
-
-# 🆕 新增：處置股資訊查詢函數 (請在此處串接您的資料源)
-def get_disposition_info(ticker):
-    """
-    請在此處實作讀取處置股的邏輯
-    回傳範例: "2026/07/02 - 2026/07/16" 或 None (若非處置中)
-    """
-    # 範例模擬：若您有外部資料，請在此讀取
-    # disposition_db = {"2337.TW": "2026/07/02 - 2026/07/16"}
-    # return disposition_db.get(ticker)
-    return None
 
 STOCK_DICT = load_stock_dict()
 
@@ -370,17 +399,18 @@ if submit_btn or st.session_state.first_run:
 
                         perf_col_key = f"後續{holding_days}日實際報酬(%)"
 
-                        # 🆕 新增：獲取處置狀態
-                        disp_info = get_disposition_info(ticker)
+                        # 🆕 新增：帶入 API 抓取的處置資訊
+                        code_only = ticker.split(".")[0]
+                        disp_info = DISPOSITION_STOCKS.get(code_only, "")
 
                         integrated_results.append({
-                            "股票代號": ticker.split(".")[0], 
+                            "股票代號": code_only, 
                             "股票名稱": display_name,
                             "原始名稱": stock['name'],
                             "趨勢模板": "✅" if is_trend_template else "❌",
                             "動能狀態判定": vcp_status_final,
                             "50MA乖離率(%)": bias_50,
-                            "處置資訊": disp_info, # 🆕 放入資料列
+                            "處置資訊": disp_info, # 🚀 儲存處置狀態與期間
                             "IBD式 絕對分數": ibd, "對比 0050 超額強度": ibd - benchmark_ibd_score,
                             "短線抗跌韌性分數": resilience, "逆風勝率": f"{outperform} / {total_panic_days} 天",
                             "逆風上漲天數": f"{np.sum(s_ret.reindex(panic_dates_list) > 0)} 天",
@@ -438,6 +468,7 @@ if submit_btn or st.session_state.first_run:
                     else:
                         column_config_dict[perf_col_name] = st.column_config.NumberColumn("今日至今持平率", format="%.2f%%")
                         
+                    # 💡 UI 隱藏原始名稱與輔助欄位，保持表格乾淨
                     display_df = df_final.drop(columns=["原始名稱", "趨勢模板", "動能狀態判定", "處置資訊"], errors="ignore")
                     st.dataframe(display_df, use_container_width=True, hide_index=True, column_config=column_config_dict)
                     
@@ -456,12 +487,14 @@ if submit_btn or st.session_state.first_run:
                             perf_str = f" ➡️ 後續報酬: {row[perf_col_name]:.1f}%" if show_perf else ""
                             bias_val = row['50MA乖離率(%)']
                             
-                            # 🆕 處置股顯示邏輯
-                            disp_info = row.get("處置資訊")
-                            disp_str = f" | 🔒 處置: {disp_info}" if disp_info else ""
+                            # 🚀 提取並組合處置期間字串
+                            disp_info = row.get("處置資訊", "")
+                            disp_str = f" <span style='color: #ff9900; font-weight: bold;'>[🔒處置期間: {disp_info}]</span>" if disp_info else ""
                             
                             bias_str = f"<span style='background-color: #ffcccc; color: #990000; padding: 2px 4px; border-radius: 4px; font-weight: bold;'>{bias_val:.1f}%</span>" if bias_val >= 30.0 else f"{bias_val:.1f}%"
                             formatted_name = f"{row['趨勢模板']} {row['原始名稱']} 【{row['動能狀態判定']}】"
+                            
+                            # 🚀 完美安插在 50MA 乖離率括號內後方
                             lines.append(f"* {formatted_name} ({bias_str}{disp_str}){perf_str}")
                         return "\n".join(lines)
 
