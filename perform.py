@@ -652,3 +652,4 @@ if submit_btn or st.session_state.first_run:
                         c2.caption("👉 戰略部署：長短線皆跑輸大盤，在馬克系統中屬於弱勢標的，建議審慎評估資金配置與汰弱留強。")
                     except Exception as e:
                         st.error(f"數據錯誤: {e}")
+                    
