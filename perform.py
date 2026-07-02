@@ -631,9 +631,10 @@ if submit_btn or st.session_state.first_run:
                     
                     # --- 2. 執行顯示區塊 (用 try 包起來) ---
                     # 這是你的主區塊，請確保整段縮排層級一致
+                    # --- 請刪除舊代碼，並貼上以下這段確保縮排一致 ---
                     try:
                         c1, c2 = st.columns(2)
-                
+                        
                         c1.success(f"### 👑 第一象限：逆風真龍頭 ({len(true_leaders)} 檔)")
                         c1.markdown(format_stocks(true_leaders, show_perf=True, is_backtesting=is_backtesting), unsafe_allow_html=True)
                         c1.caption("👉 戰略部署：長線動能擊敗大盤，且短線抗跌表現達到當前動態合格線以上。隨時注意 VCP 出量突破。")
@@ -649,6 +650,6 @@ if submit_btn or st.session_state.first_run:
                         c2.error(f"### 🚨 第四象限：無情剔除名單 ({len(laggards)} 檔)")
                         c2.markdown(format_stocks(laggards, show_perf=True, is_backtesting=is_backtesting), unsafe_allow_html=True)
                         c2.caption("👉 戰略部署：長短線皆跑輸大盤，在馬克系統中屬於弱勢標的，建議審慎評估資金配置與汰弱留強。")
-                
+                    
                     except Exception as e:
                         st.error(f"數據錯誤: {e}")
