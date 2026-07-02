@@ -631,21 +631,21 @@ if submit_btn or st.session_state.first_run:
             
                     return "\n".join(lines)
 
-# --- 顯示區塊 (確保所有參數都帶上關鍵字，解決 SyntaxError) ---
-c1, c2 = st.columns(2)
+            # --- 顯示區塊 (確保所有參數都帶上關鍵字，解決 SyntaxError) ---
+            c1, c2 = st.columns(2)
 
-c1.success(f"### 👑 第一象限：逆風真龍頭 ({len(true_leaders)} 檔)")
-c1.markdown(format_stocks(true_leaders, show_perf=True, is_backtesting=is_backtesting), unsafe_allow_html=True)
-c1.caption("👉 戰略部署：長線動能擊敗大盤，且短線抗跌表現達到當前動態合格線以上。隨時注意 VCP 出量突破。")
+            c1.success(f"### 👑 第一象限：逆風真龍頭 ({len(true_leaders)} 檔)")
+            c1.markdown(format_stocks(true_leaders, show_perf=True, is_backtesting=is_backtesting), unsafe_allow_html=True)
+            c1.caption("👉 戰略部署：長線動能擊敗大盤，且短線抗跌表現達到當前動態合格線以上。隨時注意 VCP 出量突破。")
 
-c1.info(f"### 🚀 第二象限：高 Beta 攻擊兵 ({len(momentum_only)} 檔)")
-c1.markdown(format_stocks(momentum_only, show_perf=True, is_backtesting=is_backtesting), unsafe_allow_html=True)
-c1.caption("👉 戰略部署：長線極強，但修正波動高於大盤. 一旦大盤止穩，這群股票往往是右側出量追擊的首選。")
+            c1.info(f"### 🚀 第二象限：高 Beta 攻擊兵 ({len(momentum_only)} 檔)")
+            c1.markdown(format_stocks(momentum_only, show_perf=True, is_backtesting=is_backtesting), unsafe_allow_html=True)
+            c1.caption("👉 戰略部署：長線極強，但修正波動高於大盤. 一旦大盤止穩，這群股票往往是右側出量追擊的首選。")
 
-c2.warning(f"### 🛡️ 第三象限：資金避風港 ({len(defensive_only)} 檔)")
-c2.markdown(format_stocks(defensive_only, show_perf=True, is_backtesting=is_backtesting), unsafe_allow_html=True)
-c2.caption("👉 戰略部署：短線極度抗跌，長線動能尚未完全追上。若有打底完成標的，高抗跌意味主力在低檔死守，值得關注！")
+            c2.warning(f"### 🛡️ 第三象限：資金避風港 ({len(defensive_only)} 檔)")
+            c2.markdown(format_stocks(defensive_only, show_perf=True, is_backtesting=is_backtesting), unsafe_allow_html=True)
+            c2.caption("👉 戰略部署：短線極度抗跌，長線動能尚未完全追上。若有打底完成標的，高抗跌意味主力在低檔死守，值得關注！")
 
-c2.error(f"### 🚨 第四象限：無情剔除名單 ({len(laggards)} 檔)")
-c2.markdown(format_stocks(laggards, show_perf=True, is_backtesting=is_backtesting), unsafe_allow_html=True)
-c2.caption("👉 戰略部署：長短線皆跑輸大盤，在馬克系統中屬於弱勢標的，建議審慎評估資金配置與汰弱留強。")
+            c2.error(f"### 🚨 第四象限：無情剔除名單 ({len(laggards)} 檔)")
+            c2.markdown(format_stocks(laggards, show_perf=True, is_backtesting=is_backtesting), unsafe_allow_html=True)
+            c2.caption("👉 戰略部署：長短線皆跑輸大盤，在馬克系統中屬於弱勢標的，建議審慎評估資金配置與汰弱留強。")
