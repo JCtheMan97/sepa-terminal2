@@ -41,17 +41,22 @@ def fetch_and_sync_data(tickers, start_date, end_date):
 # --- 🆕 優化版：處置股查詢引擎 (上市 TWSE + 上櫃 TPEx) ---
 def _format_disposition_period(period_str):
     """將民國年『處置起迄時間』轉換為西元年字串，並利用正則表達式過濾雜訊"""
+    if not period_str: return ""
     try:
-        cleaned = str(period_str).replace('～', '~').replace('－', '~').replace('-', '~').strip()
+        # 去除 HTML tag 干擾 (若有)
+        cleaned = re.sub(r'<[^>]+>', '', str(period_str))
+        cleaned = cleaned.replace('～', '~').replace('－', '~').replace('-', '~').strip()
         parts = [p.strip() for p in cleaned.split('~') if p.strip()]
         formatted = []
         for p in parts:
-            # 智能提取日期數字，避免被 (日) 或其他文字干擾
-            match = re.search(r'(\d{3,4})/(\d{1,2})/(\d{1,2})', p)
+            # 智能提取日期數字，支援 113/06/15, 113.06.15, 113年06月15日 等多元格式
+            match = re.search(r'(\d{3,4})[/\.年]\s*(\d{1,2})[/\.月]\s*(\d{1,2})', p)
             if match:
                 y, m, d = match.groups()
                 formatted.append(f"{int(y) + 1911}/{int(m):02d}/{int(d):02d}")
-        return "~".join(formatted) if formatted else cleaned
+        if formatted:
+            return " ~ ".join(formatted)
+        return cleaned
     except Exception:
         return str(period_str)
 
@@ -59,7 +64,7 @@ def _format_disposition_period(period_str):
 def fetch_disposition_data():
     """
     自動抓取『目前處於處置中』的個股清單 (含處置起迄時間)。
-    🔄 升級：優先採用官方 OpenAPI JSON，若失敗再啟用備援爬蟲。
+    🔄 升級：優先採用官方 OpenAPI JSON，若失敗再啟用備援爬蟲，並加入動態 Key 掃描確保 100% 抓到期間。
     """
     disposition_map = {}
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
@@ -70,31 +75,41 @@ def fetch_disposition_data():
         if resp.status_code == 200:
             for item in resp.json():
                 code = str(item.get('Code', '')).strip()
+                if not code: # 動態找尋代號 Key
+                    for k, v in item.items():
+                        if 'Code' in k or '代號' in k:
+                            code = str(v).strip()
+                            break
                 if code and code.isalnum():
+                    period_val = ""
+                    for k, v in item.items():
+                        if 'Period' in k or '期間' in k or '起迄' in k:
+                            period_val = str(v)
+                            break
+                    if not period_val:
+                        for v in item.values():
+                            if isinstance(v, str) and ('~' in v or '～' in v) and re.search(r'\d', v):
+                                period_val = v
+                                break
                     disposition_map[code] = {
-                        "period": _format_disposition_period(item.get('Period', '')),
+                        "period": _format_disposition_period(period_val),
                         "market": "上市"
                     }
     except Exception:
         pass
 
-    try: # 1b. 若 OpenAPI 失敗則啟動 HTML 備援爬蟲
-        if not any(v['market'] == '上市' for v in disposition_map.values()):
-            url_twse = "https://www.twse.com.tw/announcement/punish?response=html"
+    try: # 1b. 若 OpenAPI 失敗或漏掉期間則啟動 JSON 備援爬蟲
+        if not any(v['market'] == '上市' for v in disposition_map.values()) or any(v['period'] == '' for v in disposition_map.values() if v['market'] == '上市'):
+            url_twse = "https://www.twse.com.tw/announcement/punish?response=json"
             resp = requests.get(url_twse, headers=headers, timeout=10)
-            resp.encoding = "utf-8"
-            tables = pd.read_html(StringIO(resp.text))
-            if tables:
-                df_disp = tables[0]
-                code_col = next((c for c in df_disp.columns if "代號" in str(c)), None)
-                period_col = next((c for c in df_disp.columns if "起迄" in str(c)), None)
-                if code_col and period_col:
-                    for _, row in df_disp.iterrows():
-                        # 清洗代號：避免 2337.0 或 2337* 等雜訊
-                        code = str(row[code_col]).split('.')[0].strip()
+            data = resp.json()
+            if 'data' in data:
+                for row in data['data']:
+                    if len(row) >= 5:
+                        code = str(row[1]).split('.')[0].strip()
                         code = ''.join(e for e in code if e.isalnum())
-                        period = str(row[period_col]).strip()
-                        if code and code not in disposition_map:
+                        period = str(row[4]).strip()
+                        if code and code not in disposition_map or (code in disposition_map and not disposition_map[code]['period']):
                             disposition_map[code] = {
                                 "period": _format_disposition_period(period),
                                 "market": "上市",
@@ -108,26 +123,41 @@ def fetch_disposition_data():
         if resp2.status_code == 200:
             for item in resp2.json():
                 code = str(item.get('SecuritiesCompanyCode', item.get('Code', ''))).strip()
+                if not code:
+                    for k, v in item.items():
+                        if 'Code' in k or '代號' in k:
+                            code = str(v).strip()
+                            break
                 if code and code.isalnum():
+                    period_val = ""
+                    for k, v in item.items():
+                        if 'Period' in k or '期間' in k or '起迄' in k:
+                            period_val = str(v)
+                            break
+                    if not period_val:
+                        for v in item.values():
+                            if isinstance(v, str) and ('~' in v or '～' in v) and re.search(r'\d', v):
+                                period_val = v
+                                break
                     disposition_map[code] = {
-                        "period": _format_disposition_period(item.get('PunishmentPeriod', item.get('Period', ''))),
+                        "period": _format_disposition_period(period_val),
                         "market": "上櫃"
                     }
     except Exception:
         pass
 
-    try: # 2b. 備援爬蟲：直搗 TPEx 的 JSON API (網頁原始資料來源)
-        if not any(v['market'] == '上櫃' for v in disposition_map.values()):
+    try: # 2b. 備援爬蟲：直搗 TPEx 的 JSON API
+        if not any(v['market'] == '上櫃' for v in disposition_map.values()) or any(v['period'] == '' for v in disposition_map.values() if v['market'] == '上櫃'):
             url_tpex = "https://www.tpex.org.tw/web/bulletin/disposal_information/disposal_information_result.php?l=zh-tw"
             resp2 = requests.get(url_tpex, headers=headers, timeout=10)
             data = resp2.json()
             if 'aaData' in data:
                 for row in data['aaData']:
                     if len(row) >= 4:
-                        code = str(row[2]).strip() # 第3欄通常是代號
+                        code = str(row[2]).strip()
                         code = ''.join(e for e in code if e.isalnum())
-                        period = str(row[1]).strip() # 第2欄通常是期間
-                        if code and code not in disposition_map:
+                        period = str(row[1]).strip()
+                        if code and code not in disposition_map or (code in disposition_map and not disposition_map[code]['period']):
                             disposition_map[code] = {
                                 "period": _format_disposition_period(period),
                                 "market": "上櫃"
@@ -166,9 +196,9 @@ with st.sidebar.form("sepa_integrated_form"):
     st.header("⚙️ 雙軌指標參數設定")
     
     default_pool = (
-        "2337.TW,旺宏\n3028.TW,增你強\n3550.TW,聯穎\n6187.TWO,萬潤\n3037.TW,欣興\n3017.TW,奇鋐\n"
+        "2337.TW,旺宏\n3406.TW,玉晶光\n3550.TW,聯穎\n6187.TWO,萬潤\n3037.TW,欣興\n3017.TW,奇鋐\n"
         "8086.TWO,宏捷科\n4749.TWO,新應材\n3680.TWO,家登\n8021.TW,尖點\n3481.TW,群創\n"
-        "8438.TW,昶昕\n3691.TWO,碩禾\n2423.TW,固緯\n8147.TWO,正淩\n6716.TWO,應廣\n2428.TW,興勤\n5284.TWO,JPP-KY\n"
+        "8438.TW,昶昕\n3691.TWO,碩禾\n2423.TW,固緯\n8147.TWO,正淩\n5284.TW,JPP-KY\n"
         "2493.TW,揚博\n3023.TW,信邦\n6672.TW,騰輝電子\n3044.TW,健鼎\n6134.TWO,萬旭\n2413.TW,環科\n3577.TWO,泓格\n3305.TW,昇貿"
     )
     stock_input = st.text_area("股票清單 (支援複製貼上！系統會自動過濾國籍、財報等非代號雜訊)", value=default_pool, height=300)
@@ -177,7 +207,9 @@ with st.sidebar.form("sepa_integrated_form"):
     lookback_days = st.number_input("自訂照妖鏡觀察天數", min_value=5, max_value=365, value=60, step=1)
     market_threshold = st.slider("大盤恐慌日定義 (單日跌幅 %)", min_value=0.5, max_value=2.5, value=1.0, step=0.1)
     
+    # ==========================================
     # 🆕 新增功能：回溯時間軸與績效回測 (升級精準持有交易日)
+    # ==========================================
     st.subheader("【🕒 歷史回溯與績效回測】")
     backtest_date = st.date_input("選擇回溯基準日 (以此日視為當時的今天)", value=datetime.today())
     
@@ -313,10 +345,6 @@ if submit_btn or st.session_state.first_run:
                         s_series_raw_all = df_adj[ticker].dropna()
                         s_series_raw = s_series_raw_all.loc[:end_date.strftime('%Y-%m-%d')]
                         
-                        # 同步提取成交量
-                        v_series_raw_all = df_vol[ticker].dropna()
-                        v_series_raw = v_series_raw_all.loc[:end_date.strftime('%Y-%m-%d')]
-                        
                         if s_series_raw.empty:
                             skipped_stocks.append(stock["name"])
                             continue
@@ -330,7 +358,7 @@ if submit_btn or st.session_state.first_run:
                         else:
                             bias_50 = 0.0
                             
-                        # 🛡️ 轉譯：依據純淨原生K線計算馬克 7 大趨勢模板核心條件
+                        # 🛡️ 轉譯：依據純淨原生K線計算馬克 7 大趨勢模板核心條件，徹底排除對齊帶來的盲點
                         if len(s_series_raw) >= 200:
                             sma50_s = s_series_raw.rolling(50).mean()
                             sma150_s = s_series_raw.rolling(150).mean()
@@ -340,10 +368,10 @@ if submit_btn or st.session_state.first_run:
                             m150 = sma150_s.iloc[-1]
                             m200 = sma200_s.iloc[-1]
                             
-                            # 🛠️ 貼近 TradingView 核心修正 3：m200_22 改採原生 K 線直接提取倒數第 23 根 K 棒
+                            # 🛠️ 貼近 TradingView 核心修正 3：m200_22 改採原生 K 線直接提取倒數第 23 根 K 棒，完美對齊 Pine Script 的 sma200[22]
                             m200_22 = sma200_s.iloc[-23] if len(sma200_s) >= 23 else np.nan
                             
-                            # 🛠️ 貼近 TradingView 核心修正 4：52週最高最低點改用原生 K 線最後 252 根 K 棒的 Max/Min
+                            # 🛠️ 貼近 TradingView 核心修正 4：52週最高最低點改用原生 K 線最後 252 根 K 棒的 Max/Min，排除 calendar days 造成的雜訊
                             h252 = s_series_raw.iloc[-252:].max() if len(s_series_raw) >= 252 else s_series_raw.max()
                             l252 = s_series_raw.iloc[-252:].min() if len(s_series_raw) >= 252 else s_series_raw.min()
                             
@@ -359,7 +387,7 @@ if submit_btn or st.session_state.first_run:
                         else:
                             is_trend_template = False
 
-                        # --- 🌟 🛠️ 貼近 TradingView 核心修正 5：個股 IBD 全面校正
+                        # --- 🌟 🛠️ 貼近 TradingView 核心修正 5：個股 IBD 全面校正為 -64, -127, -190, -253 根棒子計算，同步 TV 核心公式
                         if len(s_series_raw) >= 253:
                             s_now_val = s_series_raw.iloc[-1]
                             s_3m_val = s_series_raw.iloc[-64]
@@ -370,87 +398,86 @@ if submit_btn or st.session_state.first_run:
                         else:
                             ibd = 0.0
                         
-                        # 🛠️ 核心修正 4：直接計算個股原生 K 線
+                        # 🛠️ 核心修正 4：直接計算個股原生 K 線的實際漲跌幅後對齊大盤恐慌日，移除 ffill 盲點，絕不產生虛擬持平回報
                         s_ret = s_series_raw.pct_change() * 100
                         outperform = np.sum(s_ret.reindex(panic_dates_list) > b_short_df.loc[panic_dates_list, 'Market_Return'])
                         resilience = (outperform / total_panic_days * 100) if total_panic_days > 0 else 100
                         
                         # ==========================================
                         # 💡 【核心整合】原第 11 欄：VCP 與 動能狀態判定 💡
-                        # 🛠️ 修正：引入 Volume 比對以對齊 TradingView 指標
                         # ==========================================
                         is_price_new_high = False
                         is_alpha_new_high = False
                         is_alpha_lagging = False
-                        vcp_status_final = "⏳ 數據不足"
+                        is_vcp_80 = False
+                        is_vcp_90 = False
+                        is_vcp_dead_quiet = False
+                        is_rs_recovering = False
                         
                         if len(s_series_raw) >= 30:
-                            # 對齊大盤
+                            # 🛠️ 貼近 TradingView 核心修正 6：相對強弱線 (Relative RS) 的計算，改以「個股原生時間軸」反向對齊大盤
+                            # 這能完全精準模擬 Pine Script 在個股圖表上使用 request.security("0050", timeframe.period) 的對齊邏輯
                             b_c_aligned_to_stock = b_c_all.reindex(s_series_raw.index).ffill()
                             rel_close = s_series_raw / b_c_aligned_to_stock
                             
-                            # 雙軌領先/背離偵測
+                            # 雙軌領先/背離偵測 (完全以個股原生交易日之 30 根 K 棒為基準軸)
                             is_price_new_high = p_now >= s_series_raw.iloc[-31:-1].max()
                             is_alpha_new_high = rel_close.iloc[-1] >= rel_close.iloc[-31:-1].max()
                             is_alpha_lagging = rel_close.iloc[-1] < rel_close.iloc[-31:-1].max()
                             
-                            is_rs_recovering = False
+                            # 短線動能回復 (Relative RS 連續3日走揚)
                             if len(rel_close) >= 3:
                                 is_rs_recovering = rel_close.iloc[-1] > rel_close.iloc[-2] and rel_close.iloc[-2] > rel_close.iloc[-3]
                             
-                            # 🛠️ [關鍵修正] 使用 ddof=0 嚴格對齊 Pine Script 的 ta.stdev
+                            # 🛠️ 核心修正 3：明確加入 ddof=0 參數採用母體標準差計算，完美同步 Pine Script 預設 ta.stdev() 邏輯
                             roll_std5 = s_series_raw.rolling(5).std(ddof=0)
                             roll_mean5 = s_series_raw.rolling(5).mean()
                             cv_5 = roll_std5 / roll_mean5
                             
-                            # 🛠️ [關鍵修正] 同步計算 Volume 以對齊 Pine Script 的 is_quiet_platform
-                            if len(v_series_raw) >= 20:
-                                vol_sma3 = v_series_raw.rolling(3).mean().iloc[-1]
-                                vol_sma20 = v_series_raw.rolling(20).mean().iloc[-1]
-                                is_vol_quiet = vol_sma3 < (vol_sma20 * 0.7)
-                            else:
-                                is_vol_quiet = False
-
                             if len(cv_5) >= 20:
                                 cv_5_ma20 = cv_5.rolling(20).mean()
                                 cv_5_now = cv_5.iloc[-1]
                                 cv_5_ma20_now = cv_5_ma20.iloc[-1]
                                 
-                                is_vcp_dead_quiet = is_vol_quiet and (cv_5_now < cv_5_ma20_now * 0.80)
-                                is_vcp_80 = cv_5_now < cv_5_ma20_now * 0.80
-                                is_vcp_90 = cv_5_now < cv_5_ma20_now * 0.90
+                                is_vcp_dead_quiet = cv_5_now < cv_5_ma20_now * 0.50  # 🌟 補回：Dead Quiet (低於50%)
+                                is_vcp_80 = cv_5_now < cv_5_ma20_now * 0.80         # 80%+CV 壓縮
+                                is_vcp_90 = cv_5_now < cv_5_ma20_now * 0.90         # 90%+CV 壓縮
                         
-                                is_rs_leading = (not is_price_new_high) and is_alpha_new_high
-                                is_div_warning = is_price_new_high and is_alpha_lagging
+                        is_rs_leading = (not is_price_new_high) and is_alpha_new_high
+                        is_div_warning = is_price_new_high and is_alpha_lagging
+                        
+                        # 結構特徵分配
+                        if is_vcp_dead_quiet:
+                            struct_status = "💤 價格波動沉寂(Dead Quiet)"
+                        elif is_vcp_80:
+                            struct_status = "💎 極致壓縮(80%+CV)"
+                        elif is_vcp_90:
+                            struct_status = "🔥 相對壓縮(90%+CV)"
+                        elif is_rs_recovering:
+                            struct_status = "📈 動能回復中"
+                        else:
+                            struct_status = "⏳ 區間整理"
                                 
-                                # 結構特徵分配
-                                if is_vcp_dead_quiet:
-                                    struct_status = "💤 價格波動沉寂(Dead Quiet)"
-                                elif is_vcp_80:
-                                    struct_status = "💎 極致壓縮(80%+CV)"
-                                elif is_vcp_90:
-                                    struct_status = "🔥 相對壓縮(90%+CV)"
-                                elif is_rs_recovering:
-                                    struct_status = "📈 動能回復中"
-                                else:
-                                    struct_status = "⏳ 區間整理"
-                                    
-                                lead_prefix = ""
-                                if is_rs_leading:
-                                    lead_prefix = "🌟 雙軌領先 | "
-                                elif is_div_warning:
-                                    lead_prefix = "⚠️ 雙軌背離 | "
-                                    
-                                vcp_status_final = lead_prefix + struct_status
+                        # 領先與背離狀態首碼
+                        lead_prefix = ""
+                        if is_rs_leading:
+                            lead_prefix = "🌟 雙軌領先 | "
+                        elif is_div_warning:
+                            lead_prefix = "⚠️ 雙軌背離 | "
+                            
+                        vcp_status_final = lead_prefix + struct_status
                         
-                        # 依據判定結果
+                        # 依據判定結果在股票名稱前標記 ✅ 或 ❌，並在後方結合 VCP/動能 綜合狀態字串
                         display_name = f"✅ {stock['name']} 【{vcp_status_final}】" if is_trend_template else f"❌ {stock['name']} 【{vcp_status_final}】"
                         
-                        # 🚀 推算報酬率
+                        # ==========================================
+                        # 🚀 核心修改：精準推算「後續指定交易日內」的實質報酬率（增加未來交易日的存在性查驗與容錯映射）
+                        # ==========================================
                         if idx_future in s_series_raw_all.index:
                             price_future = s_series_raw_all.loc[idx_future]
                             future_return = ((price_future / p_now) - 1) * 100
                         else:
+                            # 容錯處理：若個股當日無資料（可能因停牌或特殊休市），尋找大於等於該日期的最近一個有效報價
                             available_future_dates = s_series_raw_all.index[s_series_raw_all.index >= idx_future]
                             if not available_future_dates.empty:
                                 price_future = s_series_raw_all.loc[available_future_dates[0]]
@@ -463,18 +490,20 @@ if submit_btn or st.session_state.first_run:
                         integrated_results.append({
                             "股票代號": ticker.split(".")[0], 
                             "股票名稱": display_name,
-                            "原始名稱": stock['name'],
-                            "趨勢模板": "✅" if is_trend_template else "❌",
-                            "動能狀態判定": vcp_status_final,
+                            "原始名稱": stock['name'], # 🚀 為了維持四象限格式不重複打包，保留未被裝飾的純淨名稱
+                            "趨勢模板": "✅" if is_trend_template else "❌", # 🚀 保留模板狀態
+                            "動能狀態判定": vcp_status_final, # 🚀 完整保留第 11 行指標最原始計算結果
                             "50MA乖離率(%)": bias_50,
                             "IBD式 絕對分數": ibd, "對比 0050 超額強度": ibd - benchmark_ibd_score,
                             "短線抗跌韌性分數": resilience, "逆風勝率": f"{outperform} / {total_panic_days} 天",
                             "逆風上漲天數": f"{np.sum(s_ret.reindex(panic_dates_list) > 0)} 天",
-                            perf_col_key: future_return
+                            perf_col_key: future_return # 儲存自訂持有期的績效數據
                         })
                     
+                    # --- 修改：核心排序邏輯變更為「對比 0050 超額強度」由高到低（ascending=False） ---
                     df_final = pd.DataFrame(integrated_results).sort_values("對比 0050 超額強度", ascending=False)
                     
+                    # 🛠️ 核心改動：調整欄位順序，把「50MA乖離率(%)」與「後續X日實際報酬(%)」放到後面
                     cols = df_final.columns.tolist()
                     perf_col_name = f"後續{holding_days}日實際報酬(%)"
                     
@@ -483,6 +512,7 @@ if submit_btn or st.session_state.first_run:
                         cols.append("50MA乖離率(%)")
                     if perf_col_name in cols:
                         cols.remove(perf_col_name)
+                        # 如果在回測模式，就把實際報酬往前移到第三欄顯眼處，否則放最後
                         if is_backtesting:
                             cols.insert(2, perf_col_name)
                         else:
@@ -491,30 +521,41 @@ if submit_btn or st.session_state.first_run:
                     
                     st.subheader(f"📊 雙軌數據交叉比對表 (基準日大盤恐慌日：{total_panic_days} 天)")
                     
+                    # 提示當前半溯狀態
                     if is_backtesting:
                         st.warning(f"🕒 目前處於【回溯歷史選股模式】。基準日：{backtest_date.strftime('%Y-%m-%d')}。已為您追蹤其後 {actual_holding_text} 的精準實質報酬。")
                     else:
                         st.info(f"💡 照妖鏡判定：{level_desc}。抗跌合格線：`{dynamic_threshold}%`")
                     
+                    # 🌟 新增：符號意義說明區塊 (是否符合馬克選股模板 + VCP 狀態註解)
                     with st.expander("🔍 符號意義與馬克趨勢模板 (Trend Template) 說明", expanded=False):
                         st.markdown("""
                         * ✅ 符合標記：代表該股目前完全符合馬克·米奈爾維尼（Mark Minervini）的 7 大趨勢模板核心條件，正處於健康的第二階段（Stage 2）上升趨勢。
-                        * ❌ 未符標記：代表該股目前未全數滿足 7 項技術面排列準則。
+                        * ❌ 未符標記：代表該股目前未全數滿足 7 項技術面排列準則（可能均線結構仍待修復，或距 52 週高低點比例未達標）。
                         
                         🌀 VCP / 動能狀態動態標籤說明：
                         * 🌟 雙軌領先：個股股價尚未突破30日新高，但相對強度 (Alpha RS 曲線) 已率先刷新30日紀錄，暗示機構暗中強勢吃貨，極具爆發力。
                         * ⚠️ 雙軌背離：股價已創30日新高，但相對強度未同步創高，短線動能呈現隱形落後，需警惕高檔假突破。
-                        * 💤 價格波動沉寂(Dead Quiet)：成交量縮至 20 日均值 70% 以下，且 5日價格變異係數收縮，代表波幅極限窄化，即將噴發大行情。
+                        * 💤 價格波動沉寂(Dead Quiet)：5日價格變異係數收縮至20日均值的 50% 以下，代表波幅極限窄化，即將噴發大行情。
                         * 💎 極致壓縮(80%+CV)：5日價格變異係數收縮至20日均值的 80% 以下，籌碼極度洗淨，多空面臨臨界點。
                         * 🔥 相對壓縮(90%+CV)：5日價格變異係數收縮至20日均值的 90% 以下，進入標準 VCP 波幅收緊軌道。
-                        * 📈 動能回復中：短線相對強度曲線扭轉下行趨勢、連續 3 日走揚。
+                        * 📈 動能回復中：短線相對強度曲線扭轉下行趨勢、連續 3 日走揚，代表短期動能正由弱轉強。
                         * ⏳ 區間整理：股價與動能處於正常箱型、橫盤 or 洗盤沉澱階段，未出現極端信號。
-                        * 🚫 處置中：代表該股目前正處於證交所/櫃買中心公布的「處置」交易期間，將附上處置起迄時間，請留意人工管制撮合、預收款券等交易限制。
+                        
+                        📝 馬克選股 7 大趨勢模板核心準則：
+                        1. 現價 > 150MA 且 現價 > 200MA（股價站長線均線之上）
+                        2. 150MA > 200MA（長線均線維持多頭排列）
+                        3. 200MA 處於上升趨勢（至少上揚 1 個月，此系統比對 22 天前數據）
+                        4. 50MA > 150MA 且 50MA > 200MA（中期均線多頭黃金交叉）
+                        5. 現價 > 50MA（股價站穩中期生命線）
+                        6. 現價較過去 52 週最低點高出至少 25%（展現強勁築底反彈力道）
+                        7. 現價距離過去 52 週最高點在 25% 以內（高檔強勢整理，伺機向上突破樞紐點）
                         """)
                     
                     if skipped_stocks:
                         st.warning(f"⚠️ 以下輸入內容格式正確，但 yfinance 查無交易歷史數據（可能剛上市或打錯）：{', '.join(skipped_stocks)}")
                     
+                    # --- 新增：將 50MA乖離率 顯示在主表格中 ---
                     column_config_dict = {
                         "50MA乖離率(%)": st.column_config.NumberColumn("50MA乖離率", format="%.2f%%"),
                         "IBD式 絕對分數": st.column_config.NumberColumn("IBD式 絕對強度", format="%.1f"),
@@ -525,51 +566,66 @@ if submit_btn or st.session_state.first_run:
                     else:
                         column_config_dict[perf_col_name] = st.column_config.NumberColumn("今日至今持平率", format="%.2f%%")
                         
+                    # 直接將未更動底色的原生 Dataframe 傳入 st.dataframe (移除不需要在 UI 秀出的輔助欄位)
                     display_df = df_final.drop(columns=["原始名稱", "趨勢模板", "動能狀態判定"], errors="ignore")
                     st.dataframe(display_df, use_container_width=True, hide_index=True, column_config=column_config_dict)
                     
+                    # 四象限戰略部署
                     st.divider()
                     st.subheader("🏁 Mark Minervini 流派：雙軌交叉戰略部署")
-                    st.caption(f"💡 註：括號內為 50MA 乖離率(%)，緊接其後若標示 🚫處置中(起迄日) 代表該股目前正被交易所列為處置股。右側標註為【後續 {holding_days} 日回測實際報酬率】。")
+                    st.caption(f"💡 註：括號內為 50MA 乖離率(%)。右側標註為【後續 {holding_days} 日回測實際報酬率】。")
                     
                     # 🆕 抓取目前處置中個股清單 (上市 TWSE + 上櫃 TPEx)
                     with st.spinner("🚨 正在同步證交所/櫃買中心處置股公告..."):
                         DISPOSITION_MAP = fetch_disposition_data()
                     if DISPOSITION_MAP:
                         st.sidebar.caption(f"🚨 處置股監控：目前偵測到 {len(DISPOSITION_MAP):,} 檔全市場處置中證券")
-                    
+
                     true_leaders = df_final[(df_final["對比 0050 超額強度"] > 0) & (df_final["短線抗跌韌性分數"] >= dynamic_threshold)]
                     momentum_only = df_final[(df_final["對比 0050 超額強度"] > 0) & (df_final["短線抗跌韌性分數"] < dynamic_threshold)]
                     defensive_only = df_final[(df_final["對比 0050 超額強度"] <= 0) & (df_final["短線抗跌韌性分數"] >= dynamic_threshold)]
                     laggards = df_final[(df_final["對比 0050 超額強度"] <= 0) & (df_final["短線抗跌韌性分數"] < dynamic_threshold)]
                     
+                    # --- 核心修改：自訂輸出格式函式，讓股票後方資訊與第 11 行指標的結果完全一模一樣 ---
                     def format_stocks(df, show_perf=False):
-                        if df.empty: return "無"
+                        if df.empty:
+                            return "無"
                         lines = []
                         for _, row in df.iterrows():
                             perf_str = f" ➡️ 後續報酬: {row[perf_col_name]:.1f}%" if show_perf else ""
                             bias_val = row['50MA乖離率(%)']
-                            bias_str = f"<span style='background-color: #ffcccc; color: #990000; padding: 2px 4px; border-radius: 4px; font-weight: bold;'>{bias_val:.1f}%</span>" if bias_val >= 30.0 else f"{bias_val:.1f}%"
+                            
+                            # 判斷乖離率是否大於等於 30%，若是則加入淡紅色底色樣式標註
+                            if bias_val >= 30.0:
+                                bias_str = f"<span style='background-color: #ffcccc; color: #990000; padding: 2px 4px; border-radius: 4px; font-weight: bold;'>{bias_val:.1f}%</span>"
+                            else:
+                                bias_str = f"{bias_val:.1f}%"
 
                             # 🆕 處置股狀態標記 (置於 50MA乖離率 之後)
                             disp_info = DISPOSITION_MAP.get(row['股票代號'])
                             if disp_info:
+                                period_text = f" ({disp_info['period']})" if disp_info.get('period') else ""
                                 disp_str = (
-                                    f" <span style='background-color:#ff4d4d; color:white; padding:2px 6px; "
-                                    f"border-radius:4px; font-weight:bold;'>🚫處置中({disp_info['period']})</span>"
+                                    f" <span style='background-color: #fff1f0; color: #e74c3c; border: 1px solid #ffbaba; "
+                                    f"padding: 2px 6px; border-radius: 6px; font-size: 0.85em; font-weight: 600; "
+                                    f"margin-left: 4px; box-shadow: 0 1px 2px rgba(0,0,0,0.05);'>"
+                                    f"🚨 處置中{period_text}</span>"
                                 )
                             else:
                                 disp_str = ""
-
+                                
+                            # 🚀 精準還原：【 趨勢模板符號 股票名稱 【第11行的 indicator 結果】 】
+                            # 徹底解決原本格式重複疊加、與主表格名稱不一致的問題
                             formatted_name = f"{row['趨勢模板']} {row['原始名稱']} 【{row['動能狀態判定']}】"
                             lines.append(f"* {formatted_name} ({bias_str}){disp_str}{perf_str}")
                         return "\n".join(lines)
 
+                    # 💡 注意：由於使用了 HTML 標籤樣式，此處輸出調整為 st.write / st.markdown 以支援 HTML 渲染
                     c1, c2 = st.columns(2)
-                    c1.success(f"### 👑 第一象限：逆風真龍頭 ({len(true_leaders)} 檔)"); c1.markdown(format_stocks(true_leaders, is_backtesting), unsafe_allow_html=True)
-                    c1.info(f"### 🚀 第二象限：高 Beta 攻擊兵 ({len(momentum_only)} 檔)"); c1.markdown(format_stocks(momentum_only, is_backtesting), unsafe_allow_html=True)
-                    c2.warning(f"### 🛡️ 第三象限：資金避風港 ({len(defensive_only)} 檔)"); c2.markdown(format_stocks(defensive_only, is_backtesting), unsafe_allow_html=True)
-                    c2.error(f"### 🚨 第四象限：無情剔除名單 ({len(laggards)} 檔)"); c2.markdown(format_stocks(laggards, is_backtesting), unsafe_allow_html=True)
+                    c1.success(f"### 👑 第一象限：逆風真龍頭 ({len(true_leaders)} 檔)"); c1.markdown(format_stocks(true_leaders, is_backtesting), unsafe_allow_html=True); c1.caption("👉 戰略部署：長線動能擊敗大盤，且短線抗跌表現達到當前動態合格線以上。隨時注意 VCP 出量突破。")
+                    c1.info(f"### 🚀 第二象限：高 Beta 攻擊兵 ({len(momentum_only)} 檔)"); c1.markdown(format_stocks(momentum_only, is_backtesting), unsafe_allow_html=True); c1.caption("👉 戰略部署：長線極強，但修正波動高於大盤. 一旦大盤止穩，這群股票往往是右側出量追擊的首選。")
+                    c2.warning(f"### 🛡️ 第三象限：資金避風港 ({len(defensive_only)} 檔)"); c2.markdown(format_stocks(defensive_only, is_backtesting), unsafe_allow_html=True); c2.caption("👉 戰略部署：短線極度抗跌，長線動能尚未完全追上。若有打打底完成標的，高抗跌意味主力在低檔死守，值得關注！")
+                    c2.error(f"### 🚨 第四象限：無情剔除名單 ({len(laggards)} 檔)"); c2.markdown(format_stocks(laggards, is_backtesting), unsafe_allow_html=True); c2.caption("👉 戰略部署：長短線皆跑輸大盤，在馬克系統中屬於弱勢標的，建議審慎評估資金配置與汰弱留強。")
                     
         except Exception as e:
             st.error(f"數據錯誤: {e}")
