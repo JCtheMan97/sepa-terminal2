@@ -586,8 +586,8 @@ if submit_btn or st.session_state.first_run:
                     defensive_only = df_final[(df_final["對比 0050 超額強度"] <= 0) & (df_final["短線抗跌韌性分數"] >= dynamic_threshold)]
                     laggards = df_final[(df_final["對比 0050 超額強度"] <= 0) & (df_final["短線抗跌韌性分數"] < dynamic_threshold)]
                     
-                    # --- 核心修改：自訂輸出格式函式，讓股票後方資訊與第 11 行指標的結果完全一模一樣 ---
-                    def format_stocks(df, show_perf=False):
+                    # --- 核心修改：自訂輸出格式函式，處置標籤移至新的一行，且回測時不顯示 ---
+                    def format_stocks(df, show_perf=False, is_backtesting=False):
                         if df.empty:
                             return "無"
                         lines = []
@@ -601,31 +601,32 @@ if submit_btn or st.session_state.first_run:
                             else:
                                 bias_str = f"{bias_val:.1f}%"
 
-                            # 🆕 處置股狀態標記 (置於 50MA乖離率 之後)
-                            disp_info = DISPOSITION_MAP.get(row['股票代號'])
-                            if disp_info:
-                                period_text = f" ({disp_info['period']})" if disp_info.get('period') else ""
-                                disp_str = (
-                                    f" <span style='background-color: #fff1f0; color: #e74c3c; border: 1px solid #ffbaba; "
-                                    f"padding: 2px 6px; border-radius: 6px; font-size: 0.85em; font-weight: 600; "
-                                    f"margin-left: 4px; box-shadow: 0 1px 2px rgba(0,0,0,0.05);'>"
-                                    f"🚨 處置中{period_text}</span>"
-                                )
-                            else:
-                                disp_str = ""
-                                
-                            # 🚀 精準還原：【 趨勢模板符號 股票名稱 【第11行的 indicator 結果】 】
-                            # 徹底解決原本格式重複疊加、與主表格名稱不一致的問題
-                            formatted_name = f"{row['趨勢模板']} {row['原始名稱']} 【{row['動能狀態判定']}】"
-                            lines.append(f"* {formatted_name} ({bias_str}){disp_str}{perf_str}")
+                            # 🆕 處置股狀態標記 (移至下一行，且回測模式不顯示)
+                            disp_str = ""
+                            if not is_backtesting:
+                                disp_info = DISPOSITION_MAP.get(row['股票代號'])
+                                if disp_info:
+                                    period_text = f" ({disp_info['period']})" if disp_info.get('period') else ""
+                                    # 使用 <br> 換行，不切版
+                                    disp_str = (
+                                        f"<br><span style='background-color: #fff1f0; color: #e74c3c; border: 1px solid #ffbaba; "
+                                        f"padding: 2px 6px; border-radius: 6px; font-size: 0.85em; font-weight: 600; "
+                                        f"box-shadow: 0 1px 2px rgba(0,0,0,0.05);'>"
+                                        f"🚨 處置中{period_text}</span>"
+                                    )
+                            
+                            lines.append(f"- {row['股票名稱']} ({bias_str}%){perf_str}{disp_str}")
                         return "\n".join(lines)
 
-                    # 💡 注意：由於使用了 HTML 標籤樣式，此處輸出調整為 st.write / st.markdown 以支援 HTML 渲染
-                    c1, c2 = st.columns(2)
-                    c1.success(f"### 👑 第一象限：逆風真龍頭 ({len(true_leaders)} 檔)"); c1.markdown(format_stocks(true_leaders, is_backtesting), unsafe_allow_html=True); c1.caption("👉 戰略部署：長線動能擊敗大盤，且短線抗跌表現達到當前動態合格線以上。隨時注意 VCP 出量突破。")
-                    c1.info(f"### 🚀 第二象限：高 Beta 攻擊兵 ({len(momentum_only)} 檔)"); c1.markdown(format_stocks(momentum_only, is_backtesting), unsafe_allow_html=True); c1.caption("👉 戰略部署：長線極強，但修正波動高於大盤. 一旦大盤止穩，這群股票往往是右側出量追擊的首選。")
-                    c2.warning(f"### 🛡️ 第三象限：資金避風港 ({len(defensive_only)} 檔)"); c2.markdown(format_stocks(defensive_only, is_backtesting), unsafe_allow_html=True); c2.caption("👉 戰略部署：短線極度抗跌，長線動能尚未完全追上。若有打打底完成標的，高抗跌意味主力在低檔死守，值得關注！")
-                    c2.error(f"### 🚨 第四象限：無情剔除名單 ({len(laggards)} 檔)"); c2.markdown(format_stocks(laggards, is_backtesting), unsafe_allow_html=True); c2.caption("👉 戰略部署：長短線皆跑輸大盤，在馬克系統中屬於弱勢標的，建議審慎評估資金配置與汰弱留強。")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.markdown("#### 🌟 領頭羊 (強勢+抗跌)")
+                        st.markdown(format_stocks(true_leaders, show_perf=is_backtesting, is_backtesting=is_backtesting), unsafe_allow_html=True)
+                        st.markdown("#### 🦁 動能股 (強勢+弱抗跌)")
+                        st.markdown(format_stocks(momentum_only, show_perf=is_backtesting, is_backtesting=is_backtesting), unsafe_allow_html=True)
                     
-        except Exception as e:
-            st.error(f"數據錯誤: {e}")
+                    with col2:
+                        st.markdown("#### 🛡️ 防守股 (弱勢+抗跌)")
+                        st.markdown(format_stocks(defensive_only, show_perf=is_backtesting, is_backtesting=is_backtesting), unsafe_allow_html=True)
+                        st.markdown("#### 🐢 落後股 (弱勢+弱抗跌)")
+                        st.markdown(format_stocks(laggards, show_perf=is_backtesting, is_backtesting=is_backtesting), unsafe_allow_html=True)
