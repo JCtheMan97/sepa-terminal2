@@ -95,18 +95,19 @@ def _format_disposition_period(period_str):
     except Exception:
         return str(period_str)
 
-@st.cache_data(ttl=1800)  # 處置公告每日更新，快取30分鐘
-def fetch_disposition_data():
+def fetch_disposition_data_raw():
     """
     自動抓取『目前處於處置中』的個股清單 (含處置起迄時間)。
-    🔄 升級：優先採用官方 OpenAPI JSON，若失敗再啟用備援爬蟲，並加入動態 Key 掃描確保 100% 抓到期間。
     """
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    
     disposition_map = {}
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
     # --- 上市 (TWSE) ---
     try: # 1. 優先嘗試官方 OpenAPI
-        resp = requests.get("https://openapi.twse.com.tw/v1/announcement/punish", headers=headers, timeout=5)
+        resp = requests.get("https://openapi.twse.com.tw/v1/announcement/punish", headers=headers, verify=False, timeout=8)
         if resp.status_code == 200:
             for item in resp.json():
                 code = str(item.get('Code', '')).strip()
@@ -136,7 +137,7 @@ def fetch_disposition_data():
     try: # 1b. 若 OpenAPI 失敗或漏掉期間則啟動 JSON 備援爬蟲
         if not any(v['market'] == '上市' for v in disposition_map.values()) or any(v['period'] == '' for v in disposition_map.values() if v['market'] == '上市'):
             url_twse = "https://www.twse.com.tw/announcement/punish?response=json"
-            resp = requests.get(url_twse, headers=headers, timeout=10)
+            resp = requests.get(url_twse, headers=headers, verify=False, timeout=10)
             data = resp.json()
             if 'data' in data:
                 for row in data['data']:
@@ -147,14 +148,14 @@ def fetch_disposition_data():
                         if code and code not in disposition_map or (code in disposition_map and not disposition_map[code]['period']):
                             disposition_map[code] = {
                                 "period": _format_disposition_period(period),
-                                "market": "上市",
+                               "market": "上市",
                             }
     except Exception:
         pass
 
     # --- 上櫃 (TPEx) ---
     try: # 2. 優先嘗試櫃買 OpenAPI
-        resp2 = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_punish", headers=headers, timeout=5)
+        resp2 = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_punish", headers=headers, verify=False, timeout=8)
         if resp2.status_code == 200:
             for item in resp2.json():
                 code = str(item.get('SecuritiesCompanyCode', item.get('Code', ''))).strip()
@@ -184,7 +185,7 @@ def fetch_disposition_data():
     try: # 2b. 備援爬蟲：直搗 TPEx 的 JSON API
         if not any(v['market'] == '上櫃' for v in disposition_map.values()) or any(v['period'] == '' for v in disposition_map.values() if v['market'] == '上櫃'):
             url_tpex = "https://www.tpex.org.tw/web/bulletin/disposal_information/disposal_information_result.php?l=zh-tw"
-            resp2 = requests.get(url_tpex, headers=headers, timeout=10)
+            resp2 = requests.get(url_tpex, headers=headers, verify=False, timeout=10)
             data = resp2.json()
             if 'aaData' in data:
                 for row in data['aaData']:
@@ -201,6 +202,28 @@ def fetch_disposition_data():
         pass
 
     return disposition_map
+
+_DISPOSITION_CACHE = None
+_DISPOSITION_CACHE_TIME = None
+
+def fetch_disposition_data():
+    """
+    自動抓取『目前處於處置中』的個股清單，加上自訂防鎖死時間快取。
+    """
+    global _DISPOSITION_CACHE, _DISPOSITION_CACHE_TIME
+    now = datetime.now()
+    if _DISPOSITION_CACHE is not None and _DISPOSITION_CACHE_TIME is not None:
+        if (now - _DISPOSITION_CACHE_TIME).total_seconds() < 1800:
+            return _DISPOSITION_CACHE
+            
+    res = fetch_disposition_data_raw()
+    if res:
+        _DISPOSITION_CACHE = res
+        _DISPOSITION_CACHE_TIME = now
+        return res
+    elif _DISPOSITION_CACHE is not None:
+        return _DISPOSITION_CACHE
+    return {}
 
 DISPOSITION_MAP = fetch_disposition_data()
 if DISPOSITION_MAP:
@@ -650,12 +673,13 @@ with st.sidebar.form("sepa_integrated_form"):
     lookback_days = st.number_input("自訂照妖鏡觀察天數", min_value=5, max_value=365, value=60, step=1)
     market_threshold = st.slider("大盤恐慌日定義 (單日跌幅 %)", min_value=0.5, max_value=2.5, value=1.0, step=0.1)
     
+    show_fundamental = st.checkbox("🔬 顯示基本面分析標籤", value=False, help="開啟後，下方象限列表個股名稱下方將顯示 Code 33 與 月營收之詳細徽章")
+    
     st.subheader("【🕒 歷史回溯與績效回測】")
     backtest_date = st.date_input("選擇回溯基準日 (以此日視為當時的今天)", value=datetime.today())
     holding_days = st.number_input("回溯後預計持有天數 (交易日)", min_value=1, max_value=120, value=20, step=1)
     
     is_backtesting = backtest_date < datetime.today().date()
-    show_fundamental = st.checkbox("🔬 顯示基本面分析標籤", value=False, help="開啟後，下方象限列表個股名稱下方將顯示 Code 33 與 月營收之詳細徽章")
     submit_btn = st.form_submit_button("🚀 執行雙軌交叉選股分析")
 
 # --- 🔌 API 連線與資料時間診斷 ---
