@@ -203,39 +203,45 @@ def fetch_disposition_data_raw():
 
     return disposition_map
 
-_DISPOSITION_CACHE = None
-_DISPOSITION_CACHE_TIME = None
-
-def fetch_disposition_data():
-    """
-    自動抓取『目前處於處置中』的個股清單，加上自訂防鎖死時間快取。
-    """
-    global _DISPOSITION_CACHE, _DISPOSITION_CACHE_TIME
+# --- 處置股快取：使用 st.session_state 確保跨 rerun 持久化 ---
+def _load_disposition_safe():
+    """安全載入處置股資料，存入 session_state 以跨 rerun 持久化。"""
     now = datetime.now()
-    if _DISPOSITION_CACHE is not None and _DISPOSITION_CACHE_TIME is not None:
-        if (now - _DISPOSITION_CACHE_TIME).total_seconds() < 1800:
-            return _DISPOSITION_CACHE
-            
+    # 快取命中：30 分鐘內不重複抓取
+    if "_disp_time" in st.session_state:
+        elapsed = (now - st.session_state._disp_time).total_seconds()
+        if elapsed < 1800 and st.session_state.get("DISPOSITION_MAP"):
+            return st.session_state.DISPOSITION_MAP
+    # 嘗試抓取
     res = fetch_disposition_data_raw()
     if res:
-        _DISPOSITION_CACHE = res
-        _DISPOSITION_CACHE_TIME = now
-        return res
-    elif _DISPOSITION_CACHE is not None:
-        return _DISPOSITION_CACHE
-    return {}
+        st.session_state.DISPOSITION_MAP = res
+        st.session_state._disp_time = now
+    elif "DISPOSITION_MAP" not in st.session_state:
+        st.session_state.DISPOSITION_MAP = {}
+    return st.session_state.DISPOSITION_MAP
 
-DISPOSITION_MAP = fetch_disposition_data()
+DISPOSITION_MAP = _load_disposition_safe()
 if DISPOSITION_MAP:
     st.sidebar.caption(f"🚨 處置股監控：目前偵測到 {len(DISPOSITION_MAP):,} 檔全市場處置中證券")
 
-# --- 🚀 基本面 API 數據獲取與自訂防鎖死快取 ---
+# --- 🚀 基本面 API 數據獲取（快取存入 session_state 以跨 rerun 持久化） ---
 
-_FINMIND_FINANCIALS_CACHE = {}
+def _get_fin_cache():
+    if "_fin_cache" not in st.session_state:
+        st.session_state._fin_cache = {}
+    return st.session_state._fin_cache
+
+def _get_rev_cache():
+    if "_rev_cache" not in st.session_state:
+        st.session_state._rev_cache = {}
+    return st.session_state._rev_cache
+
 def fetch_finmind_financials(stock_id):
     """獲取季度損益表數據 (首選 FinMind，失敗則自動以 yfinance 作為免費備援)"""
-    if stock_id in _FINMIND_FINANCIALS_CACHE:
-        return _FINMIND_FINANCIALS_CACHE[stock_id]
+    cache = _get_fin_cache()
+    if stock_id in cache:
+        return cache[stock_id]
         
     # 1. 嘗試 FinMind API
     url = "https://api.finmindtrade.com/api/v4/data"
@@ -249,7 +255,7 @@ def fetch_finmind_financials(stock_id):
         if r.status_code == 200:
             data = r.json().get("data", [])
             if data:
-                _FINMIND_FINANCIALS_CACHE[stock_id] = data
+                _get_fin_cache()[stock_id] = data
                 return data
     except Exception:
         pass
@@ -284,19 +290,20 @@ def fetch_finmind_financials(stock_id):
                             records.append({'date': date_str, 'stock_id': stock_id, 'type': 'EPS', 'value': float(val)})
                 
                 if records:
-                    _FINMIND_FINANCIALS_CACHE[stock_id] = records
+                    _get_fin_cache()[stock_id] = records
                     return records
         except Exception:
             pass
             
     return []
 
-_FINMIND_REVENUE_CACHE = {}
 def fetch_finmind_monthly_revenue(stock_id):
-    """獲取 FinMind 月營收數據 (僅在有資料時快取)"""
-    if stock_id in _FINMIND_REVENUE_CACHE:
-        return _FINMIND_REVENUE_CACHE[stock_id]
+    """獲取月營收數據 (首選 FinMind，失敗則自動以 yfinance 季度營收近似)"""
+    cache = _get_rev_cache()
+    if stock_id in cache:
+        return cache[stock_id]
         
+    # 1. 嘗試 FinMind API
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
         "dataset": "TaiwanStockMonthRevenue",
@@ -308,10 +315,54 @@ def fetch_finmind_monthly_revenue(stock_id):
         if r.status_code == 200:
             data = r.json().get("data", [])
             if data:
-                _FINMIND_REVENUE_CACHE[stock_id] = data
+                _get_rev_cache()[stock_id] = data
                 return data
     except Exception:
         pass
+
+    # 2. 備援：yfinance 季度營收轉月營收近似值
+    for suffix in [".TW", ".TWO"]:
+        try:
+            tick = yf.Ticker(f"{stock_id}{suffix}")
+            qf = tick.quarterly_financials
+            if qf is None or qf.empty:
+                continue
+            rev_row = "Total Revenue" if "Total Revenue" in qf.index else ("Operating Revenue" if "Operating Revenue" in qf.index else None)
+            if not rev_row:
+                continue
+            records = []
+            for col_date in sorted(qf.columns):
+                val = qf.loc[rev_row, col_date]
+                if pd.isna(val) or float(val) <= 0:
+                    continue
+                quarterly_rev = float(val)
+                # 將季度營收均分為 3 個月（以季末月為主月份，往前推 2 個月）
+                end_month = col_date.month
+                end_year = col_date.year
+                for offset in range(3):
+                    m = end_month - offset
+                    y = end_year
+                    if m <= 0:
+                        m += 12
+                        y -= 1
+                    records.append({
+                        "date": f"{y}-{m:02d}-01",
+                        "revenue_year": y,
+                        "revenue_month": m,
+                        "revenue": quarterly_rev / 3.0,
+                        "stock_id": stock_id
+                    })
+            if records:
+                # 去重：同年月只保留最後一筆
+                seen = {}
+                for rec in records:
+                    key = (rec["revenue_year"], rec["revenue_month"])
+                    seen[key] = rec
+                deduped = list(seen.values())
+                _get_rev_cache()[stock_id] = deduped
+                return deduped
+        except Exception:
+            pass
     return []
 
 
