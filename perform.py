@@ -237,6 +237,24 @@ def fetch_finmind_monthly_revenue(stock_id):
         pass
     return []
 
+@st.cache_data(ttl=3600) # 法人買賣超每日更新，快取1小時
+def fetch_finmind_institutional(stock_id, start_date_str, end_date_str):
+    """獲取 FinMind 三大法人買賣超數據"""
+    url = "https://api.finmindtrade.com/api/v4/data"
+    params = {
+        "dataset": "TaiwanStockInstitutionalInvestorsBuySell",
+        "data_id": stock_id,
+        "start_date": start_date_str,
+        "end_date": end_date_str
+    }
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        if r.status_code == 200:
+            return r.json().get("data", [])
+    except Exception:
+        pass
+    return []
+
 @lru_cache(maxsize=256) # 使用 lru_cache 取代 st.cache_data：@st.cache_data 在 ThreadPoolExecutor 執行緒中不可靠
 def fetch_yfinance_surprise(ticker):
     """獲取 yfinance 盈餘意外與分析師預估數據（使用 lru_cache 確保線程安全）"""
@@ -447,36 +465,88 @@ def process_earnings_surprise(surprise_json, backtest_date):
         pass
     return None
 
-# --- 🚀 多線程併發加載基本面數據 ---
+# --- 🐳 籌碼面運算核心邏輯 ---
+
+def process_chip_flow(inst_raw, backtest_date_str):
+    """
+    計算外資與投信近5日累計買賣超張數
+    """
+    default_res = {"foreign_5d": 0.0, "trust_5d": 0.0, "dealer_5d": 0.0, "total_5d": 0.0}
+    if not inst_raw:
+        return default_res
+    try:
+        df = pd.DataFrame(inst_raw)
+        if df.empty:
+            return default_res
+            
+        # 僅保留基準日之前的資料
+        df = df[df["date"] <= backtest_date_str]
+        if df.empty:
+            return default_res
+            
+        df["net_buy"] = (df["buy"] - df["sell"]) / 1000.0  # 換算為張數
+        
+        df_pivot = df.pivot(index="date", columns="name", values="net_buy").fillna(0.0)
+        df_pivot = df_pivot.sort_index()
+        
+        # 取得最後 5 個交易日
+        last_5 = df_pivot.tail(5)
+        
+        foreign_5d = float(last_5["Foreign_Investor"].sum()) if "Foreign_Investor" in last_5.columns else 0.0
+        trust_5d = float(last_5["Investment_Trust"].sum()) if "Investment_Trust" in last_5.columns else 0.0
+        
+        d_self = last_5["Dealer_self"].sum() if "Dealer_self" in last_5.columns else 0.0
+        d_hedge = last_5["Dealer_Hedging"].sum() if "Dealer_Hedging" in last_5.columns else 0.0
+        dealer_5d = float(d_self + d_hedge)
+        
+        total_5d = foreign_5d + trust_5d + dealer_5d
+        
+        return {
+            "foreign_5d": foreign_5d,
+            "trust_5d": trust_5d,
+            "dealer_5d": dealer_5d,
+            "total_5d": total_5d
+        }
+    except Exception:
+        pass
+    return default_res
+
+# --- 🚀 多線程併發加載基本面與籌碼數據 ---
 
 def get_single_stock_fundamentals(args):
     ticker, backtest_date = args
     stock_id = ticker.split('.')[0]
     backtest_date_str = backtest_date.strftime('%Y-%m-%d')
     
+    # 觀察 30 天以取得 5 個交易日的三大法人買賣超資料
+    inst_start_date_str = (backtest_date - timedelta(days=30)).strftime('%Y-%m-%d')
+    
     # 1. 抓取數據 (使用 Cache)
     financials = fetch_finmind_financials(stock_id)
     monthly_rev = fetch_finmind_monthly_revenue(stock_id)
     surprise_json = fetch_yfinance_surprise(ticker)
+    inst_raw = fetch_finmind_institutional(stock_id, inst_start_date_str, backtest_date_str)
     
-    # 2. 計算基本面指標
+    # 2. 計算基本面與籌碼指標
     c33 = process_code33(financials, backtest_date_str)
     mrev = process_monthly_momentum(monthly_rev, backtest_date_str)
     surprise = process_earnings_surprise(surprise_json, backtest_date)
+    chip = process_chip_flow(inst_raw, backtest_date_str)
     
-    return ticker, c33, mrev, surprise
+    return ticker, c33, mrev, surprise, chip
 
 def fetch_all_fundamentals(tickers, backtest_date):
-    """併發加載所有股票的基本面資料"""
+    """併發加載所有股票的基本面與籌碼資料"""
     results = {}
     args_list = [(ticker, backtest_date) for ticker in tickers]
     with ThreadPoolExecutor(max_workers=20) as executor:
         futures_results = list(executor.map(get_single_stock_fundamentals, args_list))
-    for ticker, c33, mrev, surprise in futures_results:
+    for ticker, c33, mrev, surprise, chip in futures_results:
         results[ticker] = {
             "c33": c33,
             "mrev": mrev,
-            "surprise": surprise
+            "surprise": surprise,
+            "chip": chip
         }
     return results
 
@@ -763,7 +833,7 @@ if submit_btn or st.session_state.first_run:
 
                         perf_col_key = f"後續{holding_days}日實際報酬(%)"
                         
-                        # 讀取基本面計算數據
+                        # 讀取基本面與籌碼計算數據
                         fund_data = FUNDAMENTAL_RESULTS.get(ticker, {})
                         c33_display = fund_data.get("c33", {}).get("display", "N/A")
                         mrev_display = fund_data.get("mrev", {}).get("display", "N/A")
@@ -773,6 +843,11 @@ if submit_btn or st.session_state.first_run:
                             surprise_display = f"+{surp_val:.1f}%" if surp_val > 0 else f"{surp_val:.1f}%"
                         else:
                             surprise_display = "—"
+                            
+                        # 讀取籌碼數據
+                        chip_data = fund_data.get("chip", {"foreign_5d": 0.0, "trust_5d": 0.0, "dealer_5d": 0.0, "total_5d": 0.0})
+                        foreign_5d = chip_data.get("foreign_5d", 0.0)
+                        trust_5d = chip_data.get("trust_5d", 0.0)
 
                         integrated_results.append({
                             "ticker": ticker, # 隱藏欄位
@@ -784,6 +859,8 @@ if submit_btn or st.session_state.first_run:
                             "🧪 Code 33": c33_display,
                             "🚀 月營收爆發": mrev_display,
                             "💥 盈餘意外": surprise_display,
+                            "外資5日超(張)": foreign_5d,
+                            "投信5日超(張)": trust_5d,
                             "50MA乖離率(%)": bias_50,
                             "IBD式 絕對分數": ibd, "對比 0050 超額強度": ibd - benchmark_ibd_score,
                             "短線抗跌韌性分數": resilience, "逆風勝率": f"{outperform} / {total_panic_days} 天",
@@ -797,19 +874,25 @@ if submit_btn or st.session_state.first_run:
                     perf_col_name = f"後續{holding_days}日實際報酬(%)"
                     
                     fundamental_cols = ["🧪 Code 33", "🚀 月營收爆發", "💥 盈餘意外"]
-                    for f_col in fundamental_cols:
+                    chip_cols = ["外資5日超(張)", "投信5日超(張)"]
+                    
+                    for f_col in fundamental_cols + chip_cols:
                         if f_col in cols:
                             cols.remove(f_col)
                     idx_to_insert = cols.index("股票名稱") + 1
+                    for c_col in reversed(chip_cols):
+                        cols.insert(idx_to_insert, c_col)
                     for f_col in reversed(fundamental_cols):
                         cols.insert(idx_to_insert, f_col)
+                        
                     if "50MA乖離率(%)" in cols:
                         cols.remove("50MA乖離率(%)")
                         cols.append("50MA乖離率(%)")
                     if perf_col_name in cols:
                         cols.remove(perf_col_name)
                         if is_backtesting:
-                            cols.insert(cols.index("股票名稱") + 1 + len(fundamental_cols), perf_col_name)
+                            # 插入在籌碼欄位後面
+                            cols.insert(cols.index("股票名稱") + 1 + len(fundamental_cols) + len(chip_cols), perf_col_name)
                         else:
                             cols.append(perf_col_name)
                     df_final = df_final[cols]
@@ -854,7 +937,9 @@ if submit_btn or st.session_state.first_run:
                         "短線抗跌韌性分數": st.column_config.ProgressColumn("抗跌得分", min_value=0, max_value=100, format="%.0f分"),
                         "🧪 Code 33": st.column_config.TextColumn("🧪 Code 33", help="連續三季的 EPS YoY、營收 YoY、淨利率是否同步呈現遞增趨勢。✅=三加速確認"),
                         "🚀 月營收爆發": st.column_config.TextColumn("🚀 月營收爆發", help="月營收創12M新高 或 YoY連2月加速"),
-                        "💥 盈餘意外": st.column_config.TextColumn("💥 盈餘意外", help="有分析師預估值且已公佈實際EPS時顯示。— 表示無預估值")
+                        "💥 盈餘意外": st.column_config.TextColumn("💥 盈餘意外", help="有分析師預估值且已公佈實際EPS時顯示。— 表示無預估值"),
+                        "外資5日超(張)": st.column_config.NumberColumn("外資5日買超(張)", format="%+d"),
+                        "投信5日超(張)": st.column_config.NumberColumn("投信5日買超(張)", format="%+d")
                     }
                     if is_backtesting:
                         column_config_dict[perf_col_name] = st.column_config.NumberColumn(f"🎯 後續{holding_days}日報酬", format="%.2f%%")
@@ -867,19 +952,22 @@ if submit_btn or st.session_state.first_run:
                     st.divider()
                     st.subheader("🏁 Mark Minervini 流派：雙軌交叉戰略部署")
                     
-                    # 說明文字：依基本面開關狀態而異
+                    # 說明文字：依開關狀態而異
+                    desc_lines = []
                     if show_fundamental:
+                        desc_lines.append("🧪 <b>Code 33</b> = 連3季 EPS/營收/淨利率三加速&nbsp;｜&nbsp;🚀 <b>月營收</b> = 創12M新高 或 YoY連2月加速&nbsp;｜&nbsp;💥 <b>盈餘意外</b> = 實際優於/遜於預估（無預估值不顯示）")
+                    if show_chip:
+                        desc_lines.append("🐳 <b>外資5D</b> = 外資近5日累計買賣超張數&nbsp;｜&nbsp;🎯 <b>投信5D</b> = 投信近5日累計買賣超張數（雙軌強勢股核心指標）")
+                        
+                    if desc_lines:
                         st.markdown(
                             "<span style='color:#555;font-size:0.84em;'>"
-                            "💡 <b>基本面標籤說明</b>（懸停可檢視詳細軌跡）：&nbsp;"
-                            "🧪 <b>Code 33</b> = 連3季 EPS/營收/淨利率三加速&nbsp;｜&nbsp;"
-                            "🚀 <b>月營收</b> = 創12M新高 或 YoY連2月加速&nbsp;｜&nbsp;"
-                            "💥 <b>盈餘意外</b> = 實際EPS優於/遜於預估（無預估值不顯示）"
+                            "💡 <b>指標徽章說明</b>（懸停可檢視詳細數據）：<br>&nbsp;&nbsp;" + "<br>&nbsp;&nbsp;".join(desc_lines) +
                             "</span>",
                             unsafe_allow_html=True
                         )
                     else:
-                        st.caption(f"💡 括號內為 50MA 乖離率(%)。右側標註為【後續 {holding_days} 日回測實際報酬率】。可在左側開啟「🔬 顯示基本面分析標籤」查看 Code 33 / 月營收 / 盈餘意外。")
+                        st.caption(f"💡 括號內為 50MA 乖離率(%)。右側標註為【後續 {holding_days} 日回測實際報酬率】。可在左側開啟「🔬 顯示基本面分析標籤」與「🐳 顯示法人籌碼標籤」查看更多維度資訊。")
                     
                     with st.spinner("🚨 正在同步證交所/櫃買中心處置股公告..."):
                         DISPOSITION_MAP = fetch_disposition_data()
@@ -934,47 +1022,47 @@ if submit_btn or st.session_state.first_run:
                             )
                             lines.append(f"* {main_line}")
 
-                            # 基本面子行（僅在 show_fundamental 開啟時，以縮排徽章列呈現）
-                            if show_fundamental:
-                                ticker = row["ticker"]
-                                fund = FUNDAMENTAL_RESULTS.get(ticker, {})
-                                fund_badges_list = []
+                            # 子行（依開關狀態輸出基本面與籌碼徽章）
+                            sub_badges_list = []
+                            ticker = row["ticker"]
+                            fund = FUNDAMENTAL_RESULTS.get(ticker, {})
 
-                                # 🧪 Code 33（僅符合時顯示）
+                            if show_fundamental:
+                                # 🧪 Code 33
                                 c33 = fund.get("c33", {})
                                 if c33.get("active", False):
                                     c33_traj = c33.get("trajectory", "").replace('"', '&quot;').replace("\\n", "&#10;")
-                                    fund_badges_list.append(
+                                    sub_badges_list.append(
                                         f'<span style="background:#e6f7ff;color:#0050b3;border:1px solid #91d5ff;'
                                         f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
                                         f'margin-right:5px;cursor:help;" title="【Code 33】連3季 EPS/營收/淨利率同步加速&#10;{c33_traj}">🧪 Code 33</span>'
                                     )
 
-                                # 🚀 月營收（僅達標時顯示）
+                                # 🚀 月營收
                                 mrev = fund.get("mrev", {})
                                 mrev_12h = mrev.get("is_12m_high", False)
                                 mrev_acc = mrev.get("is_accelerating", False)
                                 mrev_traj = mrev.get("trajectory", "").replace('"', '&quot;').replace("\\n", "&#10;")
                                 if mrev_12h and mrev_acc:
-                                    fund_badges_list.append(
+                                    sub_badges_list.append(
                                         f'<span style="background:#f6ffed;color:#389e0d;border:1px solid #b7eb8f;'
                                         f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
                                         f'margin-right:5px;cursor:help;" title="【月營收新高 &amp; YoY加速】&#10;{mrev_traj}">🚀 月營收爆發</span>'
                                     )
                                 elif mrev_12h:
-                                    fund_badges_list.append(
+                                    sub_badges_list.append(
                                         f'<span style="background:#f6ffed;color:#389e0d;border:1px solid #b7eb8f;'
                                         f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
                                         f'margin-right:5px;cursor:help;" title="【月營收創12M新高】&#10;{mrev_traj}">🚀 營收新高</span>'
                                     )
                                 elif mrev_acc:
-                                    fund_badges_list.append(
+                                    sub_badges_list.append(
                                         f'<span style="background:#f6ffed;color:#389e0d;border:1px solid #b7eb8f;'
                                         f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
                                         f'margin-right:5px;cursor:help;" title="【YoY連續兩月加速】&#10;{mrev_traj}">🚀 營收YoY加速</span>'
                                     )
 
-                                # 💥 盈餘意外（僅有分析師預估值且已公佈時顯示）
+                                # 💥 盈餘意外
                                 surprise = fund.get("surprise")
                                 if surprise:
                                     val = surprise["surprise"]
@@ -983,26 +1071,57 @@ if submit_btn or st.session_state.first_run:
                                     dt = surprise["date"]
                                     tip = f"預估 EPS: {est:.2f}&#10;實際 EPS: {act:.2f}&#10;公佈日期: {dt}"
                                     if val > 0:
-                                        fund_badges_list.append(
+                                        sub_badges_list.append(
                                             f'<span style="background:#fff7e6;color:#d46b08;border:1px solid #ffd591;'
                                             f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
                                             f'margin-right:5px;cursor:help;" title="{tip}">💥 意外 +{val:.1f}%</span>'
                                         )
                                     else:
-                                        fund_badges_list.append(
+                                        sub_badges_list.append(
                                             f'<span style="background:#fff0f6;color:#c41d7f;border:1px solid #ffadd2;'
                                             f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
                                             f'margin-right:5px;cursor:help;" title="{tip}">💥 意外 {val:.1f}%</span>'
                                         )
 
-                                # 若有任何徽章，以縮排子行呈現（用 └ 連接）
-                                if fund_badges_list:
-                                    badge_html = "".join(fund_badges_list)
-                                    lines.append(
-                                        f"  <div style='margin:-2px 0 6px 20px;line-height:2;opacity:0.95;'>"
-                                        f"<span style='color:#bbb;font-size:0.8em;margin-right:4px;'>└</span>"
-                                        f"{badge_html}</div>"
+                            if show_chip:
+                                chip = fund.get("chip", {"foreign_5d": 0.0, "trust_5d": 0.0, "dealer_5d": 0.0, "total_5d": 0.0})
+                                f_val = chip.get("foreign_5d", 0.0)
+                                t_val = chip.get("trust_5d", 0.0)
+
+                                if f_val > 0:
+                                    sub_badges_list.append(
+                                        f'<span style="background:#eaf6ff;color:#0076cc;border:1px solid #91d5ff;'
+                                        f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
+                                        f'margin-right:5px;cursor:help;" title="外資近5日累計買超 {f_val:.1f} 張">🐳 外資5D +{f_val:.0f}張</span>'
                                     )
+                                elif f_val < 0:
+                                    sub_badges_list.append(
+                                        f'<span style="background:#fff1f0;color:#cf1322;border:1px solid #ffa39e;'
+                                        f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
+                                        f'margin-right:5px;cursor:help;" title="外資近5日累計賣超 {abs(f_val):.1f} 張">🐳 外資5D {f_val:.0f}張</span>'
+                                    )
+
+                                if t_val > 0:
+                                    sub_badges_list.append(
+                                        f'<span style="background:#f6ffed;color:#389e0d;border:1px solid #b7eb8f;'
+                                        f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
+                                        f'margin-right:5px;cursor:help;" title="投信近5日累計買超 {t_val:.1f} 張">🎯 投信5D +{t_val:.0f}張</span>'
+                                    )
+                                elif t_val < 0:
+                                    sub_badges_list.append(
+                                        f'<span style="background:#fff1f0;color:#cf1322;border:1px solid #ffa39e;'
+                                        f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
+                                        f'margin-right:5px;cursor:help;" title="投信近5日累計賣超 {abs(t_val):.1f} 張">🎯 投信5D {t_val:.0f}張</span>'
+                                    )
+
+                            # 統一繪製縮排子行
+                            if sub_badges_list:
+                                badge_html = "".join(sub_badges_list)
+                                lines.append(
+                                    f"  <div style='margin:-2px 0 6px 20px;line-height:2;opacity:0.95;'>"
+                                    f"<span style='color:#bbb;font-size:0.8em;margin-right:4px;'>└</span>"
+                                    f"{badge_html}</div>"
+                                )
 
                         return "\n".join(lines)
 
