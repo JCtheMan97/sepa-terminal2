@@ -201,11 +201,14 @@ def fetch_disposition_data():
 
     return disposition_map
 
-# --- 🚀 基本面 API 數據獲取與快取 ---
+# --- 🚀 基本面 API 數據獲取與自訂防鎖死快取 ---
 
-@lru_cache(maxsize=1024)
+_FINMIND_FINANCIALS_CACHE = {}
 def fetch_finmind_financials(stock_id):
-    """獲取 FinMind 季度損益表數據"""
+    """獲取 FinMind 季度損益表數據 (僅在有資料時快取，避免失敗永久鎖死)"""
+    if stock_id in _FINMIND_FINANCIALS_CACHE:
+        return _FINMIND_FINANCIALS_CACHE[stock_id]
+        
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
         "dataset": "TaiwanStockFinancialStatements",
@@ -215,14 +218,20 @@ def fetch_finmind_financials(stock_id):
     try:
         r = requests.get(url, params=params, timeout=10)
         if r.status_code == 200:
-            return r.json().get("data", [])
+            data = r.json().get("data", [])
+            if data:
+                _FINMIND_FINANCIALS_CACHE[stock_id] = data
+                return data
     except Exception:
         pass
     return []
 
-@lru_cache(maxsize=1024)
+_FINMIND_REVENUE_CACHE = {}
 def fetch_finmind_monthly_revenue(stock_id):
-    """獲取 FinMind 月營收數據"""
+    """獲取 FinMind 月營收數據 (僅在有資料時快取)"""
+    if stock_id in _FINMIND_REVENUE_CACHE:
+        return _FINMIND_REVENUE_CACHE[stock_id]
+        
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
         "dataset": "TaiwanStockMonthRevenue",
@@ -232,14 +241,21 @@ def fetch_finmind_monthly_revenue(stock_id):
     try:
         r = requests.get(url, params=params, timeout=10)
         if r.status_code == 200:
-            return r.json().get("data", [])
+            data = r.json().get("data", [])
+            if data:
+                _FINMIND_REVENUE_CACHE[stock_id] = data
+                return data
     except Exception:
         pass
     return []
 
-@lru_cache(maxsize=1024)
+_FINMIND_INSTITUTIONAL_CACHE = {}
 def fetch_finmind_institutional(stock_id, start_date_str, end_date_str):
-    """獲取 FinMind 三大法人買賣超數據"""
+    """獲取 FinMind 三大法人買賣超數據 (僅在有資料時快取)"""
+    key = (stock_id, start_date_str, end_date_str)
+    if key in _FINMIND_INSTITUTIONAL_CACHE:
+        return _FINMIND_INSTITUTIONAL_CACHE[key]
+        
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
         "dataset": "TaiwanStockInstitutionalInvestorsBuySell",
@@ -250,14 +266,21 @@ def fetch_finmind_institutional(stock_id, start_date_str, end_date_str):
     try:
         r = requests.get(url, params=params, timeout=10)
         if r.status_code == 200:
-            return r.json().get("data", [])
+            data = r.json().get("data", [])
+            if data:
+                _FINMIND_INSTITUTIONAL_CACHE[key] = data
+                return data
     except Exception:
         pass
     return []
 
-@lru_cache(maxsize=1024)
+_TDCC_CACHE = {}
 def fetch_tdcc_holding_shares_cached(stock_id, target_date_str):
-    """獲取集保結算所個股股權分散表並計算變動"""
+    """獲取集保結算所個股股權分散表並計算變動 (僅在有資料時快取)"""
+    key = (stock_id, target_date_str)
+    if key in _TDCC_CACHE:
+        return _TDCC_CACHE[key]
+        
     target_date_clean = target_date_str.replace("-", "")
     url = "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock"
     headers = {
@@ -354,7 +377,7 @@ def fetch_tdcc_holding_shares_cached(stock_id, target_date_str):
         big_1000_t0 = dist_t0.get("15", 0.0)
         big_1000_t1 = dist_t1.get("15", 0.0)
         
-        return {
+        result = {
             "date_t0": date_t0,
             "date_t1": date_t1,
             "retail_t0": retail_t0,
@@ -364,20 +387,25 @@ def fetch_tdcc_holding_shares_cached(stock_id, target_date_str):
             "big_1000_t0": big_1000_t0,
             "big_1000_change": big_1000_t0 - big_1000_t1
         }
+        _TDCC_CACHE[key] = result
+        return result
     except:
         pass
     return None
 
 
-
-@lru_cache(maxsize=256) # 使用 lru_cache 取代 st.cache_data：@st.cache_data 在 ThreadPoolExecutor 執行緒中不可靠
+_YFINANCE_SURPRISE_CACHE = {}
 def fetch_yfinance_surprise(ticker):
-    """獲取 yfinance 盈餘意外與分析師預估數據（使用 lru_cache 確保線程安全）"""
+    """獲取 yfinance 盈餘意外與分析師預估數據 (僅在有資料時快取)"""
+    if ticker in _YFINANCE_SURPRISE_CACHE:
+        return _YFINANCE_SURPRISE_CACHE[ticker]
     try:
         tick = yf.Ticker(ticker)
         ed = tick.get_earnings_dates(limit=8)
         if ed is not None and not ed.empty:
-            return ed.to_json(date_format='iso')
+            res_json = ed.to_json(date_format='iso')
+            _YFINANCE_SURPRISE_CACHE[ticker] = res_json
+            return res_json
     except Exception:
         pass
     return None
@@ -715,6 +743,78 @@ with st.sidebar.form("sepa_integrated_form"):
     show_fundamental = st.checkbox("🔬 顯示基本面分析標籤", value=False, help="開啟後，下方象限列表個股名稱下方將顯示 Code 33、月營收與盈餘意外之詳細徽章")
     show_chip = st.checkbox("🐳 顯示法人與集保籌碼標籤", value=False, help="開啟後，下方象限列表個股名稱下方將顯示外資/投信近5日買賣超與集保大戶/散戶增減變動")
     submit_btn = st.form_submit_button("🚀 執行雙軌交叉選股分析")
+
+# --- 🔌 API 連線與資料時間診斷 ---
+st.sidebar.markdown("---")
+with st.sidebar.expander("🔌 數據引擎與資料時間診斷", expanded=True):
+    st.caption("系統會自動測試 API 連線並回報最新數據更新時間：")
+    
+    @st.cache_data(ttl=300) # 每5分鐘重新診斷一次
+    def run_fast_diagnose():
+        diag_info = {}
+        # 1. FinMind
+        try:
+            url = "https://api.finmindtrade.com/api/v4/data"
+            params = {
+                "dataset": "TaiwanStockMonthRevenue",
+                "data_id": "2330",
+                "start_date": (datetime.today() - timedelta(days=60)).strftime('%Y-%m-%d')
+            }
+            r = requests.get(url, params=params, timeout=5)
+            if r.status_code == 200:
+                data = r.json().get("data", [])
+                if data:
+                    diag_info["FinMind (月營收)"] = f"🟢 正常 (最新: {data[-1]['revenue_year']}/{data[-1]['revenue_month']})"
+                else:
+                    diag_info["FinMind (月營收)"] = "🟡 無回傳資料"
+            else:
+                diag_info["FinMind (月營收)"] = f"🔴 錯誤 (HTTP {r.status_code})"
+        except Exception as e:
+            diag_info["FinMind (月營收)"] = f"🔴 連線失敗: {type(e).__name__}"
+            
+        # 2. TDCC
+        try:
+            url = "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Referer": "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock"
+            }
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            r = requests.get(url, headers=headers, verify=False, timeout=5)
+            if r.status_code == 200:
+                soup = BeautifulSoup(r.text, 'html.parser')
+                select_tag = soup.find('select', {'name': 'scaDate'})
+                if select_tag:
+                    dates = [opt.get('value') for opt in select_tag.find_all('option')]
+                    if dates:
+                        diag_info["台灣集保所"] = f"🟢 正常 (最新日期: {dates[0]})"
+                    else:
+                        diag_info["台灣集保所"] = "🟡 無日期選項"
+                else:
+                    diag_info["台灣集保所"] = "🔴 解析失敗 (無選單)"
+            else:
+                diag_info["台灣集保所"] = f"🔴 錯誤 (HTTP {r.status_code})"
+        except Exception as e:
+            diag_info["台灣集保所"] = f"🔴 連線失敗: {type(e).__name__}"
+            
+        # 3. yfinance
+        try:
+            tick = yf.Ticker("2330.TW")
+            ed = tick.get_earnings_dates(limit=1)
+            if ed is not None and not ed.empty:
+                diag_info["yfinance (盈餘)"] = f"🟢 正常 (最新: {ed.index[0].strftime('%Y-%m-%d')})"
+            else:
+                diag_info["yfinance (盈餘)"] = "🟡 無預估資料"
+        except Exception as e:
+            diag_info["yfinance (盈餘)"] = f"🔴 連線失敗: {type(e).__name__}"
+            
+        return diag_info
+        
+    diag_results = run_fast_diagnose()
+    for name, status in diag_results.items():
+        st.write(f"**{name}**")
+        st.write(status)
 
 def get_stocks_pool(text):
     """智能掃描器：自動比對輸入文字與 STOCK_DICT 名稱"""
