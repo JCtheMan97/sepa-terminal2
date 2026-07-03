@@ -525,10 +525,8 @@ with st.sidebar.form("sepa_integrated_form"):
     holding_days = st.number_input("回溯後預計持有天數 (交易日)", min_value=1, max_value=120, value=20, step=1)
     
     is_backtesting = backtest_date < datetime.today().date()
+    show_fundamental = st.checkbox("🔬 顯示基本面分析標籤", value=False, help="開啟後，下方象限列表個股名稱下方將顯示 Code 33、月營收與盈餘意外之詳細徽章")
     submit_btn = st.form_submit_button("🚀 執行雙軌交叉選股分析")
-
-# 基本面分析開關 (在 form 外，獨立 widget)
-show_fundamental = st.sidebar.toggle("🔬 顯示基本面分析標籤", value=False, help="開啟後，象限列表中每支股票下方將顯示 Code 33 / 月營收爆發 / 盈餘意外等基本面標籤（懸停可檢視詳細數據）")
 
 def get_stocks_pool(text):
     """智能掃描器：自動比對輸入文字與 STOCK_DICT 名稱"""
