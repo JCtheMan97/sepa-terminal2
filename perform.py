@@ -203,7 +203,7 @@ def fetch_disposition_data():
 
 # --- 🚀 基本面 API 數據獲取與快取 ---
 
-@st.cache_data(ttl=86400) # 財報每季發布，快取1天
+@lru_cache(maxsize=1024)
 def fetch_finmind_financials(stock_id):
     """獲取 FinMind 季度損益表數據"""
     url = "https://api.finmindtrade.com/api/v4/data"
@@ -220,7 +220,7 @@ def fetch_finmind_financials(stock_id):
         pass
     return []
 
-@st.cache_data(ttl=3600) # 月營收每月發布，快取1小時
+@lru_cache(maxsize=1024)
 def fetch_finmind_monthly_revenue(stock_id):
     """獲取 FinMind 月營收數據"""
     url = "https://api.finmindtrade.com/api/v4/data"
@@ -237,7 +237,7 @@ def fetch_finmind_monthly_revenue(stock_id):
         pass
     return []
 
-@st.cache_data(ttl=3600) # 法人買賣超每日更新，快取1小時
+@lru_cache(maxsize=1024)
 def fetch_finmind_institutional(stock_id, start_date_str, end_date_str):
     """獲取 FinMind 三大法人買賣超數據"""
     url = "https://api.finmindtrade.com/api/v4/data"
@@ -255,7 +255,7 @@ def fetch_finmind_institutional(stock_id, start_date_str, end_date_str):
         pass
     return []
 
-@st.cache_data(ttl=86400) # 集保資料每週更新，快取24小時
+@lru_cache(maxsize=1024)
 def fetch_tdcc_holding_shares_cached(stock_id, target_date_str):
     """獲取集保結算所個股股權分散表並計算變動"""
     target_date_clean = target_date_str.replace("-", "")
