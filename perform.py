@@ -7,15 +7,48 @@ import os
 import re
 import requests
 from io import StringIO
+from concurrent.futures import ThreadPoolExecutor
 
 # 1. 網頁初始設定
 st.set_page_config(page_title="🏆 SEPA 雙軌強勢股終端機", layout="wide")
 
-# 2. 自動載入後台字典 (相容 UTF-8-sig)
+# 2. 自動載入與動態初始化後台字典 (相容 UTF-8-sig)
 @st.cache_data
 def load_stock_dict():
     stock_dict = {}
     file_path = "stocks_list.txt"
+    
+    # 若檔案不存在或為空，自動自官方 API 抓取所有上市與上櫃股票代號
+    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+        try:
+            # 1. 獲取上市公司 (TWSE)
+            url_twse = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
+            r_twse = requests.get(url_twse, timeout=10)
+            if r_twse.status_code == 200:
+                for item in r_twse.json():
+                    code = item.get("Code", "").strip()
+                    name = item.get("Name", "").strip()
+                    if code and name and code.isdigit() and len(code) == 4:
+                        stock_dict[f"{code}.TW"] = name
+            
+            # 2. 獲取上櫃公司 (TPEx)
+            url_tpex = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
+            r_tpex = requests.get(url_tpex, timeout=10)
+            if r_tpex.status_code == 200:
+                for item in r_tpex.json():
+                    code = item.get("SecuritiesCompanyCode", "").strip()
+                    name = item.get("CompanyName", "").strip()
+                    if code and name and code.isdigit() and len(code) == 4:
+                        stock_dict[f"{code}.TWO"] = name
+            
+            # 寫入 stocks_list.txt
+            with open(file_path, "w", encoding="utf-8-sig") as f:
+                for code, name in sorted(stock_dict.items()):
+                    f.write(f"{code},{name}\n")
+        except Exception as e:
+            st.sidebar.error(f"自動初始化股票資料庫失敗: {e}")
+            
+    # 從檔案讀取
     if os.path.exists(file_path):
         try:
             with open(file_path, "r", encoding="utf-8-sig") as f:
@@ -23,10 +56,10 @@ def load_stock_dict():
                     if ',' in line:
                         code, name = line.strip().split(',', 1)
                         stock_dict[code.strip()] = name.strip()
-            # ➡️ 選項二：【量化研究流】內斂灰色小字，加上金融專用千分位格式
             st.sidebar.caption(f"📊 核心引擎：台股標的資料庫已就緒 (已同步 {len(stock_dict):,} 檔成分股)")
         except Exception as e:
             st.sidebar.error(f"系統資料庫讀取失敗: {e}")
+            
     return stock_dict
 
 STOCK_DICT = load_stock_dict()
@@ -167,6 +200,285 @@ def fetch_disposition_data():
 
     return disposition_map
 
+# --- 🚀 基本面 API 數據獲取與快取 ---
+
+@st.cache_data(ttl=86400) # 財報每季發布，快取1天
+def fetch_finmind_financials(stock_id):
+    """獲取 FinMind 季度損益表數據"""
+    url = "https://api.finmindtrade.com/api/v4/data"
+    params = {
+        "dataset": "TaiwanStockFinancialStatements",
+        "data_id": stock_id,
+        "start_date": "2024-01-01"
+    }
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        if r.status_code == 200:
+            return r.json().get("data", [])
+    except Exception:
+        pass
+    return []
+
+@st.cache_data(ttl=3600) # 月營收每月發布，快取1小時
+def fetch_finmind_monthly_revenue(stock_id):
+    """獲取 FinMind 月營收數據"""
+    url = "https://api.finmindtrade.com/api/v4/data"
+    params = {
+        "dataset": "TaiwanStockMonthRevenue",
+        "data_id": stock_id,
+        "start_date": "2024-01-01"
+    }
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        if r.status_code == 200:
+            return r.json().get("data", [])
+    except Exception:
+        pass
+    return []
+
+@st.cache_data(ttl=1800) # 盈餘意外預估，快取30分鐘
+def fetch_yfinance_surprise(ticker):
+    """獲取 yfinance 盈餘意外與分析師預估數據"""
+    try:
+        tick = yf.Ticker(ticker)
+        ed = tick.get_earnings_dates(limit=5)
+        if ed is not None and not ed.empty:
+            return ed.to_json(date_format='iso')
+    except Exception:
+        pass
+    return None
+
+# --- 🧪 基本面運算核心邏輯 (支持歷史回溯時間軸過濾) ---
+
+def process_code33(financials, backtest_date_str):
+    """
+    計算 Code 33 狀態及軌跡。
+    條件：連續三季的 EPS YoY、營收 YoY、淨利率 同步呈現遞增趨勢。
+    """
+    if not financials:
+        return {"active": False, "trajectory": "無財務報表數據", "display": "N/A"}
+        
+    # 歷史回溯過濾：僅保留基準日之前的資料
+    filtered_data = [x for x in financials if x["date"] <= backtest_date_str]
+    if not filtered_data:
+        return {"active": False, "trajectory": "無回溯基準日前的財務數據", "display": "N/A"}
+        
+    df = pd.DataFrame(filtered_data)
+    needed_types = ["Revenue", "IncomeAfterTaxes", "EPS"]
+    df = df[df["type"].isin(needed_types)]
+    if df.empty:
+        return {"active": False, "trajectory": "無有效會計項目數據", "display": "N/A"}
+        
+    df_pivot = df.pivot(index="date", columns="type", values="value")
+    df_pivot = df_pivot.sort_index()
+    
+    eps_yoy = []
+    rev_yoy = []
+    net_margin = []
+    
+    dates = df_pivot.index.tolist()
+    for date_str in dates:
+        current_date = pd.to_datetime(date_str)
+        target_date = current_date - pd.DateOffset(years=1)
+        target_date_str = target_date.strftime('%Y-%m-%d')
+        
+        # 1. 淨利率 Margin
+        rev = df_pivot.loc[date_str, "Revenue"] if "Revenue" in df_pivot.columns else None
+        net_inc = df_pivot.loc[date_str, "IncomeAfterTaxes"] if "IncomeAfterTaxes" in df_pivot.columns else None
+        margin = (net_inc / rev * 100) if rev and rev > 0 and net_inc is not None else None
+        net_margin.append(margin)
+        
+        # 2. EPS & Revenue YoY (比對去年同季)
+        if target_date_str in df_pivot.index:
+            eps_now = df_pivot.loc[date_str, "EPS"] if "EPS" in df_pivot.columns else None
+            eps_last = df_pivot.loc[target_date_str, "EPS"] if "EPS" in df_pivot.columns else None
+            yoy_eps = (eps_now / eps_last - 1) * 100 if eps_last and eps_last != 0 and eps_now is not None else None
+            
+            rev_now = df_pivot.loc[date_str, "Revenue"] if "Revenue" in df_pivot.columns else None
+            rev_last = df_pivot.loc[target_date_str, "Revenue"] if "Revenue" in df_pivot.columns else None
+            yoy_rev = (rev_now / rev_last - 1) * 100 if rev_last and rev_last != 0 and rev_now is not None else None
+        else:
+            yoy_eps = None
+            yoy_rev = None
+            
+        eps_yoy.append(yoy_eps)
+        rev_yoy.append(yoy_rev)
+        
+    df_pivot["EPS_YoY"] = eps_yoy
+    df_pivot["Revenue_YoY"] = rev_yoy
+    df_pivot["NetMargin"] = net_margin
+    
+    valid_df = df_pivot.dropna(subset=["EPS_YoY", "Revenue_YoY", "NetMargin"])
+    if len(valid_df) < 3:
+        return {"active": False, "trajectory": "歷史季數不足 (計算 YoY 需比對去年)", "display": "不足3季數據"}
+        
+    # 連續三季加速檢測
+    eps_acc = valid_df["EPS_YoY"].iloc[-1] > valid_df["EPS_YoY"].iloc[-2] > valid_df["EPS_YoY"].iloc[-3]
+    rev_acc = valid_df["Revenue_YoY"].iloc[-1] > valid_df["Revenue_YoY"].iloc[-2] > valid_df["Revenue_YoY"].iloc[-3]
+    margin_acc = valid_df["NetMargin"].iloc[-1] > valid_df["NetMargin"].iloc[-2] > valid_df["NetMargin"].iloc[-3]
+    
+    active = eps_acc and rev_acc and margin_acc
+    
+    eps_t3 = valid_df["EPS_YoY"].iloc[-3:].tolist()
+    rev_t3 = valid_df["Revenue_YoY"].iloc[-3:].tolist()
+    margin_t3 = valid_df["NetMargin"].iloc[-3:].tolist()
+    
+    trajectory = (
+        f"EPS YoY: {eps_t3[0]:.1f}% → {eps_t3[1]:.1f}% → {eps_t3[2]:.1f}%\\n"
+        f"營收 YoY: {rev_t3[0]:.1f}% → {rev_t3[1]:.1f}% → {rev_t3[2]:.1f}%\\n"
+        f"淨利率: {margin_t3[0]:.1f}% → {margin_t3[1]:.1f}% → {margin_t3[2]:.1f}%"
+    )
+    
+    display_text = f"✅ (EPS: {eps_t3[2]:.1f}%)" if active else f"❌ (EPS: {eps_t3[2]:.1f}%)"
+    return {"active": active, "trajectory": trajectory, "display": display_text}
+
+def process_monthly_momentum(monthly_rev, backtest_date_str):
+    """
+    計算月營收動能狀態及軌跡。
+    條件：月營收創 12 個月新高，或 YoY 連續兩月加速。
+    """
+    if not monthly_rev:
+        return {"is_12m_high": False, "is_accelerating": False, "trajectory": "無營收數據", "display": "N/A"}
+        
+    filtered_data = [x for x in monthly_rev if x["date"] <= backtest_date_str]
+    if not filtered_data:
+        return {"is_12m_high": False, "is_accelerating": False, "trajectory": "無回溯基準日前的營收數據", "display": "N/A"}
+        
+    df = pd.DataFrame(filtered_data)
+    df = df.sort_values(["revenue_year", "revenue_month"]).reset_index(drop=True)
+    
+    # 建立映射以精準對齊去年同月
+    rev_map = {}
+    for _, row in df.iterrows():
+        y = int(row["revenue_year"])
+        m = int(row["revenue_month"])
+        rev_map[(y, m)] = float(row["revenue"])
+        
+    yoy_list = []
+    for _, row in df.iterrows():
+        y = int(row["revenue_year"])
+        m = int(row["revenue_month"])
+        rev_now = float(row["revenue"])
+        rev_last = rev_map.get((y - 1, m))
+        yoy = (rev_now / rev_last - 1) * 100 if rev_last and rev_last > 0 else None
+        yoy_list.append(yoy)
+        
+    df["YoY"] = yoy_list
+    
+    if len(df) < 1:
+        return {"is_12m_high": False, "is_accelerating": False, "trajectory": "無營收數據", "display": "N/A"}
+        
+    latest_idx = len(df) - 1
+    row_latest = df.iloc[latest_idx]
+    rev_latest = float(row_latest["revenue"])
+    yoy_latest = row_latest["YoY"]
+    y_lat, m_lat = int(row_latest["revenue_year"]), int(row_latest["revenue_month"])
+    
+    # 1. 12個月新高
+    is_12m_high = False
+    max_prev = 0
+    if latest_idx >= 11:
+        prev_11 = df.iloc[latest_idx-11:latest_idx]["revenue"].astype(float)
+        max_prev = prev_11.max()
+        is_12m_high = rev_latest > max_prev
+        
+    # 2. YoY 連續兩月加速 (YoY_t > YoY_{t-1} > YoY_{t-2})
+    is_accelerating = False
+    yoy_t0 = df.iloc[latest_idx]["YoY"]
+    yoy_t1 = df.iloc[latest_idx-1]["YoY"] if latest_idx >= 1 else None
+    yoy_t2 = df.iloc[latest_idx-2]["YoY"] if latest_idx >= 2 else None
+    if yoy_t0 is not None and yoy_t1 is not None and yoy_t2 is not None:
+        is_accelerating = yoy_t0 > yoy_t1 > yoy_t2
+        
+    yoy_str = "YoY: N/A"
+    if yoy_t0 is not None and yoy_t1 is not None and yoy_t2 is not None:
+        yoy_str = f"YoY: {yoy_t2:.1f}% → {yoy_t1:.1f}% → {yoy_t0:.1f}%"
+        
+    trajectory = (
+        f"統計期間: {y_lat}年{m_lat}月\\n"
+        f"最新單月營收: {rev_latest/1e8:.1f}億元 vs 12M最高: {max_prev/1e8:.1f}億元\\n"
+        f"{yoy_str} ({'YoY加速' if is_accelerating else 'YoY未加速'})"
+    )
+    
+    # 表格顯示格式
+    if is_12m_high and is_accelerating:
+        disp = "✅ 雙重爆發"
+    elif is_12m_high:
+        disp = "✅ 創12M新高"
+    elif is_accelerating:
+        disp = "✅ YoY連2月加速"
+    else:
+        disp = "❌"
+        
+    return {
+        "is_12m_high": is_12m_high,
+        "is_accelerating": is_accelerating,
+        "trajectory": trajectory,
+        "display": disp,
+        "latest_rev": rev_latest,
+        "latest_yoy": yoy_latest
+    }
+
+def process_earnings_surprise(surprise_json, backtest_date):
+    """
+    從 yfinance 導出 JSON 中提取最近的盈餘意外數據。
+    """
+    if not surprise_json:
+        return None
+    try:
+        ed = pd.read_json(StringIO(surprise_json))
+        if ed.empty:
+            return None
+        
+        # 轉換回 timezone-aware cutoff 來做歷史回溯過濾
+        cutoff = pd.to_datetime(backtest_date).tz_localize(ed.index.tz)
+        df_reported = ed[ed.index <= cutoff].dropna(subset=['Reported EPS', 'EPS Estimate', 'Surprise(%)'])
+        
+        if not df_reported.empty:
+            latest = df_reported.iloc[0] # yfinance 由新到舊排列
+            return {
+                "estimate": float(latest['EPS Estimate']),
+                "actual": float(latest['Reported EPS']),
+                "surprise": float(latest['Surprise(%)']),
+                "date": df_reported.index[0].strftime('%Y-%m-%d')
+            }
+    except Exception:
+        pass
+    return None
+
+# --- 🚀 多線程併發加載基本面數據 ---
+
+def get_single_stock_fundamentals(args):
+    ticker, backtest_date = args
+    stock_id = ticker.split('.')[0]
+    backtest_date_str = backtest_date.strftime('%Y-%m-%d')
+    
+    # 1. 抓取數據 (使用 Cache)
+    financials = fetch_finmind_financials(stock_id)
+    monthly_rev = fetch_finmind_monthly_revenue(stock_id)
+    surprise_json = fetch_yfinance_surprise(ticker)
+    
+    # 2. 計算基本面指標
+    c33 = process_code33(financials, backtest_date_str)
+    mrev = process_monthly_momentum(monthly_rev, backtest_date_str)
+    surprise = process_earnings_surprise(surprise_json, backtest_date)
+    
+    return ticker, c33, mrev, surprise
+
+def fetch_all_fundamentals(tickers, backtest_date):
+    """併發加載所有股票的基本面資料"""
+    results = {}
+    args_list = [(ticker, backtest_date) for ticker in tickers]
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        futures_results = list(executor.map(get_single_stock_fundamentals, args_list))
+    for ticker, c33, mrev, surprise in futures_results:
+        results[ticker] = {
+            "c33": c33,
+            "mrev": mrev,
+            "surprise": surprise
+        }
+    return results
+
 # --- 🎯 網頁標題與馬克心法區塊 ---
 st.title("🏆 SEPA 技術面篩選模組 - 雙軌相對強度決策終端機")
 
@@ -207,17 +519,11 @@ with st.sidebar.form("sepa_integrated_form"):
     lookback_days = st.number_input("自訂照妖鏡觀察天數", min_value=5, max_value=365, value=60, step=1)
     market_threshold = st.slider("大盤恐慌日定義 (單日跌幅 %)", min_value=0.5, max_value=2.5, value=1.0, step=0.1)
     
-    # ==========================================
-    # 🆕 新增功能：回溯時間軸與績效回測 (升級精準持有交易日)
-    # ==========================================
     st.subheader("【🕒 歷史回溯與績效回測】")
     backtest_date = st.date_input("選擇回溯基準日 (以此日視為當時的今天)", value=datetime.today())
-    
-    # 🆕 新增：自訂持有天數（交易日）
     holding_days = st.number_input("回溯後預計持有天數 (交易日)", min_value=1, max_value=120, value=20, step=1)
     
     is_backtesting = backtest_date < datetime.today().date()
-    
     submit_btn = st.form_submit_button("🚀 執行雙軌交叉選股分析")
 
 def get_stocks_pool(text):
@@ -244,20 +550,16 @@ def get_stocks_pool(text):
             if found: continue
 
         # 2. 第二優先：掃描全資料庫進行「模糊匹配」
-        # 只要輸入的文字「包含」在正式名稱裡，就算抓到
         found_name = False
         for code, official_name in STOCK_DICT.items():
-            # 檢查：使用者的輸入是否在正式名稱中 (例如: 輸入 "金居" 在 "金居開發" 內)
             if line in official_name or official_name in line:
                 pool.append({"id": code, "name": official_name})
                 found_name = True
-                break # 找到一個符合的就跳出
+                break
         
         if not found_name:
-            # 側邊欄提示哪些沒抓到，方便您除錯
             st.sidebar.warning(f"⚠️ 找不到此標的: {line}")
             
-    # 移除重複 (防止多種匹配結果)
     return list({item['id']: item for item in pool}.values())
 
 if 'first_run' not in st.session_state:
@@ -267,11 +569,9 @@ if submit_btn or st.session_state.first_run:
     STOCKS_POOL = get_stocks_pool(stock_input)
     st.session_state.first_run = False
     
-    # 將原本的 end_date 錨定在使用者選擇的 backtest_date
     end_date = datetime.combine(backtest_date, datetime.min.time())
-    real_today = datetime.today() # 真正的今天，用來計算回測報酬率
+    real_today = datetime.today()
     
-    # 🌟 貼近 TradingView 的改動：長線回溯擴展至 730 天（2年），提供足夠的 warm-up 歷史資料供 200MA 計算與平穩
     start_date_long = end_date - timedelta(days=730) 
     start_date_short = end_date - timedelta(days=int(lookback_days))
     
@@ -282,26 +582,21 @@ if submit_btn or st.session_state.first_run:
             else:
                 all_tickers = ["0050.TW"] + [stock["id"] for stock in STOCKS_POOL]
                 
-                # 🛠️ 核心修正 1：加上強制 +1 天位移，防止 yfinance 底層 Exclusive 機制吃掉最新一根 K 棒
                 download_end_date = real_today + timedelta(days=1)
                 df_all = fetch_and_sync_data(tuple(all_tickers), start_date_long.strftime('%Y-%m-%d'), download_end_date.strftime('%Y-%m-%d'))
                 
-                # 🛠️ 貼近 TradingView 核心修正 1：改以標準收盤價 'Close' 為準（僅調整股票股利/拆股，不扣除現金股利），完全對齊 TV 預設日線
                 df_adj = df_all['Close'] if 'Close' in df_all.columns.levels[0] else df_all['Adj Close']
-                df_vol = df_all['Volume'] # 提取成交量
+                df_vol = df_all['Volume']
                 
-                # 這裡過濾出回溯基準日前的歷史大盤數據，用作當時篩選的基準線
                 b_c_all = df_adj["0050.TW"].dropna()
                 b_c = b_c_all.loc[:end_date.strftime('%Y-%m-%d')]
                 
                 if b_c.empty:
                     st.error("❌ 回溯基準日無交易數據或超出歷史範圍，請重新選擇。")
                 else:
-                    # 🚀 新增：精準定位歷史基準日在完整時間軸的位置，以推算後續固定天數的交易日
                     idx_now = b_c.index[-1]
                     loc_now = b_c_all.index.get_loc(idx_now)
                     
-                    # 🚀 新增：推算後續第 X 個交易日的日期
                     if loc_now + holding_days < len(b_c_all):
                         idx_future = b_c_all.index[loc_now + holding_days]
                         actual_holding_text = f"後續 {holding_days} 個交易日 (至 {idx_future.strftime('%Y-%m-%d')})"
@@ -309,7 +604,6 @@ if submit_btn or st.session_state.first_run:
                         idx_future = b_c_all.index[-1]
                         actual_holding_text = f"後續 {len(b_c_all) - 1 - loc_now} 個交易日 (資料庫極限至今日 {idx_future.strftime('%Y-%m-%d')})"
 
-                    # 🛠️ 貼近 TradingView 核心修正 2：大盤基準線 IBD 全面校正為 -64, -127, -190, -253 消除 Off-by-one 偏差，精準還原 Pine Script 的 bars 概念
                     if len(b_c) >= 253:
                         b_now_val = b_c.iloc[-1]
                         b_3m_val = b_c.iloc[-64]
@@ -320,7 +614,6 @@ if submit_btn or st.session_state.first_run:
                     else:
                         benchmark_ibd_score = 0.0
                     
-                    # 短線照妖鏡
                     b_short_df = pd.DataFrame(b_c.loc[start_date_short.strftime('%Y-%m-%d'):])
                     b_short_df.columns = ['Close_Price']
                     b_short_df['Market_Return'] = b_short_df['Close_Price'].pct_change() * 100
@@ -330,6 +623,10 @@ if submit_btn or st.session_state.first_run:
                     
                     dynamic_threshold = 55.0 if total_panic_days <= 5 else (70.0 if total_panic_days <= 15 else 80.0)
                     level_desc = "⚡ 極短線回檔（採取寬鬆防守標準，勝率過半即合格）" if total_panic_days <= 5 else ("⚖️ 標準波段修正（採取黃金 70% 機構防守標準）" if total_panic_days <= 15 else "🚨 空頭大屠殺 / 系統性風險（採取極嚴苛 80% 沙裡淘金標準）")
+                    
+                    # 🚀 多線程併發加載基本面數據
+                    tickers_for_fundamentals = [stock["id"] for stock in STOCKS_POOL]
+                    FUNDAMENTAL_RESULTS = fetch_all_fundamentals(tickers_for_fundamentals, backtest_date)
                     
                     integrated_results = []
                     skipped_stocks = []
@@ -341,7 +638,6 @@ if submit_btn or st.session_state.first_run:
                             skipped_stocks.append(stock["name"])
                             continue
                         
-                        # 🌟 直接提取個股自身最原始、未包含聯合成份股 NaN 填充的純淨序列
                         s_series_raw_all = df_adj[ticker].dropna()
                         s_series_raw = s_series_raw_all.loc[:end_date.strftime('%Y-%m-%d')]
                         
@@ -351,14 +647,12 @@ if submit_btn or st.session_state.first_run:
                             
                         p_now = s_series_raw.iloc[-1]
                         
-                        # --- 🌟 在純淨的原生時間軸計算 50MA 與 乖離率 ---
                         if len(s_series_raw) >= 50:
                             ma50_val = s_series_raw.rolling(window=50).mean().iloc[-1]
                             bias_50 = ((p_now - ma50_val) / ma50_val) * 100
                         else:
                             bias_50 = 0.0
                             
-                        # 🛡️ 轉譯：依據純淨原生K線計算馬克 7 大趨勢模板核心條件，徹底排除對齊帶來的盲點
                         if len(s_series_raw) >= 200:
                             sma50_s = s_series_raw.rolling(50).mean()
                             sma150_s = s_series_raw.rolling(150).mean()
@@ -368,10 +662,8 @@ if submit_btn or st.session_state.first_run:
                             m150 = sma150_s.iloc[-1]
                             m200 = sma200_s.iloc[-1]
                             
-                            # 🛠️ 貼近 TradingView 核心修正 3：m200_22 改採原生 K 線直接提取倒數第 23 根 K 棒，完美對齊 Pine Script 的 sma200[22]
                             m200_22 = sma200_s.iloc[-23] if len(sma200_s) >= 23 else np.nan
                             
-                            # 🛠️ 貼近 TradingView 核心修正 4：52週最高最低點改用原生 K 線最後 252 根 K 棒的 Max/Min，排除 calendar days 造成的雜訊
                             h252 = s_series_raw.iloc[-252:].max() if len(s_series_raw) >= 252 else s_series_raw.max()
                             l252 = s_series_raw.iloc[-252:].min() if len(s_series_raw) >= 252 else s_series_raw.min()
                             
@@ -387,7 +679,6 @@ if submit_btn or st.session_state.first_run:
                         else:
                             is_trend_template = False
 
-                        # --- 🌟 🛠️ 貼近 TradingView 核心修正 5：個股 IBD 全面校正為 -64, -127, -190, -253 根棒子計算，同步 TV 核心公式
                         if len(s_series_raw) >= 253:
                             s_now_val = s_series_raw.iloc[-1]
                             s_3m_val = s_series_raw.iloc[-64]
@@ -398,14 +689,10 @@ if submit_btn or st.session_state.first_run:
                         else:
                             ibd = 0.0
                         
-                        # 🛠️ 核心修正 4：直接計算個股原生 K 線的實際漲跌幅後對齊大盤恐慌日，移除 ffill 盲點，絕不產生虛擬持平回報
                         s_ret = s_series_raw.pct_change() * 100
                         outperform = np.sum(s_ret.reindex(panic_dates_list) > b_short_df.loc[panic_dates_list, 'Market_Return'])
                         resilience = (outperform / total_panic_days * 100) if total_panic_days > 0 else 100
                         
-                        # ==========================================
-                        # 💡 【核心整合】原第 11 欄：VCP 與 動能狀態判定 💡
-                        # ==========================================
                         is_price_new_high = False
                         is_alpha_new_high = False
                         is_alpha_lagging = False
@@ -415,21 +702,16 @@ if submit_btn or st.session_state.first_run:
                         is_rs_recovering = False
                         
                         if len(s_series_raw) >= 30:
-                            # 🛠️ 貼近 TradingView 核心修正 6：相對強弱線 (Relative RS) 的計算，改以「個股原生時間軸」反向對齊大盤
-                            # 這能完全精準模擬 Pine Script 在個股圖表上使用 request.security("0050", timeframe.period) 的對齊邏輯
                             b_c_aligned_to_stock = b_c_all.reindex(s_series_raw.index).ffill()
                             rel_close = s_series_raw / b_c_aligned_to_stock
                             
-                            # 雙軌領先/背離偵測 (完全以個股原生交易日之 30 根 K 棒為基準軸)
                             is_price_new_high = p_now >= s_series_raw.iloc[-31:-1].max()
                             is_alpha_new_high = rel_close.iloc[-1] >= rel_close.iloc[-31:-1].max()
                             is_alpha_lagging = rel_close.iloc[-1] < rel_close.iloc[-31:-1].max()
                             
-                            # 短線動能回復 (Relative RS 連續3日走揚)
                             if len(rel_close) >= 3:
                                 is_rs_recovering = rel_close.iloc[-1] > rel_close.iloc[-2] and rel_close.iloc[-2] > rel_close.iloc[-3]
                             
-                            # 🛠️ 核心修正 3：明確加入 ddof=0 參數採用母體標準差計算，完美同步 Pine Script 預設 ta.stdev() 邏輯
                             roll_std5 = s_series_raw.rolling(5).std(ddof=0)
                             roll_mean5 = s_series_raw.rolling(5).mean()
                             cv_5 = roll_std5 / roll_mean5
@@ -439,14 +721,13 @@ if submit_btn or st.session_state.first_run:
                                 cv_5_now = cv_5.iloc[-1]
                                 cv_5_ma20_now = cv_5_ma20.iloc[-1]
                                 
-                                is_vcp_dead_quiet = cv_5_now < cv_5_ma20_now * 0.50  # 🌟 補回：Dead Quiet (低於50%)
-                                is_vcp_80 = cv_5_now < cv_5_ma20_now * 0.80         # 80%+CV 壓縮
-                                is_vcp_90 = cv_5_now < cv_5_ma20_now * 0.90         # 90%+CV 壓縮
+                                is_vcp_dead_quiet = cv_5_now < cv_5_ma20_now * 0.50
+                                is_vcp_80 = cv_5_now < cv_5_ma20_now * 0.80
+                                is_vcp_90 = cv_5_now < cv_5_ma20_now * 0.90
                         
                         is_rs_leading = (not is_price_new_high) and is_alpha_new_high
                         is_div_warning = is_price_new_high and is_alpha_lagging
                         
-                        # 結構特徵分配
                         if is_vcp_dead_quiet:
                             struct_status = "💤 價格波動沉寂(Dead Quiet)"
                         elif is_vcp_80:
@@ -458,7 +739,6 @@ if submit_btn or st.session_state.first_run:
                         else:
                             struct_status = "⏳ 區間整理"
                                 
-                        # 領先與背離狀態首碼
                         lead_prefix = ""
                         if is_rs_leading:
                             lead_prefix = "🌟 雙軌領先 | "
@@ -466,18 +746,12 @@ if submit_btn or st.session_state.first_run:
                             lead_prefix = "⚠️ 雙軌背離 | "
                             
                         vcp_status_final = lead_prefix + struct_status
-                        
-                        # 依據判定結果在股票名稱前標記 ✅ 或 ❌，並在後方結合 VCP/動能 綜合狀態字串
                         display_name = f"✅ {stock['name']} 【{vcp_status_final}】" if is_trend_template else f"❌ {stock['name']} 【{vcp_status_final}】"
                         
-                        # ==========================================
-                        # 🚀 核心修改：精準推算「後續指定交易日內」的實質報酬率（增加未來交易日的存在性查驗與容錯映射）
-                        # ==========================================
                         if idx_future in s_series_raw_all.index:
                             price_future = s_series_raw_all.loc[idx_future]
                             future_return = ((price_future / p_now) - 1) * 100
                         else:
-                            # 容錯處理：若個股當日無資料（可能因停牌或特殊休市），尋找大於等於該日期的最近一個有效報價
                             available_future_dates = s_series_raw_all.index[s_series_raw_all.index >= idx_future]
                             if not available_future_dates.empty:
                                 price_future = s_series_raw_all.loc[available_future_dates[0]]
@@ -486,48 +760,69 @@ if submit_btn or st.session_state.first_run:
                                 future_return = 0.0
 
                         perf_col_key = f"後續{holding_days}日實際報酬(%)"
+                        
+                        # 讀取基本面計算數據
+                        fund_data = FUNDAMENTAL_RESULTS.get(ticker, {})
+                        c33_display = fund_data.get("c33", {}).get("display", "N/A")
+                        mrev_display = fund_data.get("mrev", {}).get("display", "N/A")
+                        surprise_data = fund_data.get("surprise")
+                        if surprise_data:
+                            surp_val = surprise_data["surprise"]
+                            surprise_display = f"+{surp_val:.1f}%" if surp_val > 0 else f"{surp_val:.1f}%"
+                        else:
+                            surprise_display = "N/A"
 
                         integrated_results.append({
+                            "ticker": ticker, # 隱藏欄位
                             "股票代號": ticker.split(".")[0], 
                             "股票名稱": display_name,
-                            "原始名稱": stock['name'], # 🚀 為了維持四象限格式不重複打包，保留未被裝飾的純淨名稱
-                            "趨勢模板": "✅" if is_trend_template else "❌", # 🚀 保留模板狀態
-                            "動能狀態判定": vcp_status_final, # 🚀 完整保留第 11 行指標最原始計算結果
+                            "原始名稱": stock['name'],
+                            "趨勢模板": "✅" if is_trend_template else "❌",
+                            "動能狀態判定": vcp_status_final,
+                            "🧪 Code 33": c33_display,
+                            "🚀 月營收爆發": mrev_display,
+                            "💥 盈餘意外": surprise_display,
                             "50MA乖離率(%)": bias_50,
                             "IBD式 絕對分數": ibd, "對比 0050 超額強度": ibd - benchmark_ibd_score,
                             "短線抗跌韌性分數": resilience, "逆風勝率": f"{outperform} / {total_panic_days} 天",
                             "逆風上漲天數": f"{np.sum(s_ret.reindex(panic_dates_list) > 0)} 天",
-                            perf_col_key: future_return # 儲存自訂持有期的績效數據
+                            perf_col_key: future_return
                         })
                     
-                    # --- 修改：核心排序邏輯變更為「對比 0050 超額強度」由高到低（ascending=False） ---
                     df_final = pd.DataFrame(integrated_results).sort_values("對比 0050 超額強度", ascending=False)
                     
-                    # 🛠️ 核心改動：調整欄位順序，把「50MA乖離率(%)」與「後續X日實際報酬(%)」放到後面
                     cols = df_final.columns.tolist()
                     perf_col_name = f"後續{holding_days}日實際報酬(%)"
+                    
+                    # 重新安排基本面欄位順序至顯眼處
+                    fundamental_cols = ["🧪 Code 33", "🚀 月營收爆發", "💥 盈餘意外"]
+                    for f_col in fundamental_cols:
+                        if f_col in cols:
+                            cols.remove(f_col)
+                    
+                    # 插入至股票名稱後面
+                    idx_to_insert = cols.index("股票名稱") + 1
+                    for f_col in reversed(fundamental_cols):
+                        cols.insert(idx_to_insert, f_col)
                     
                     if "50MA乖離率(%)" in cols:
                         cols.remove("50MA乖離率(%)")
                         cols.append("50MA乖離率(%)")
                     if perf_col_name in cols:
                         cols.remove(perf_col_name)
-                        # 如果在回測模式，就把實際報酬往前移到第三欄顯眼處，否則放最後
                         if is_backtesting:
-                            cols.insert(2, perf_col_name)
+                            cols.insert(cols.index("股票名稱") + 1 + len(fundamental_cols), perf_col_name)
                         else:
                             cols.append(perf_col_name)
                     df_final = df_final[cols]
                     
                     st.subheader(f"📊 雙軌數據交叉比對表 (基準日大盤恐慌日：{total_panic_days} 天)")
                     
-                    # 提示當前半溯狀態
                     if is_backtesting:
                         st.warning(f"🕒 目前處於【回溯歷史選股模式】。基準日：{backtest_date.strftime('%Y-%m-%d')}。已為您追蹤其後 {actual_holding_text} 的精準實質報酬。")
                     else:
                         st.info(f"💡 照妖鏡判定：{level_desc}。抗跌合格線：`{dynamic_threshold}%`")
                     
-                    # 🌟 新增：符號意義說明區塊 (是否符合馬克選股模板 + VCP 狀態註解)
                     with st.expander("🔍 符號意義與馬克趨勢模板 (Trend Template) 說明", expanded=False):
                         st.markdown("""
                         * ✅ 符合標記：代表該股目前完全符合馬克·米奈爾維尼（Mark Minervini）的 7 大趨勢模板核心條件，正處於健康的第二階段（Stage 2）上升趨勢。
@@ -555,27 +850,26 @@ if submit_btn or st.session_state.first_run:
                     if skipped_stocks:
                         st.warning(f"⚠️ 以下輸入內容格式正確，但 yfinance 查無交易歷史數據（可能剛上市或打錯）：{', '.join(skipped_stocks)}")
                     
-                    # --- 新增：將 50MA乖離率 顯示在主表格中 ---
                     column_config_dict = {
                         "50MA乖離率(%)": st.column_config.NumberColumn("50MA乖離率", format="%.2f%%"),
                         "IBD式 絕對分數": st.column_config.NumberColumn("IBD式 絕對強度", format="%.1f"),
-                        "短線抗跌韌性分數": st.column_config.ProgressColumn("抗跌得分", min_value=0, max_value=100, format="%.0f分")
+                        "短線抗跌韌性分數": st.column_config.ProgressColumn("抗跌得分", min_value=0, max_value=100, format="%.0f分"),
+                        "🧪 Code 33": st.column_config.TextColumn("🧪 Code 33", help="連續三季的 EPS YoY、營收 YoY、淨利率 是否同步呈現遞增趨勢"),
+                        "🚀 月營收爆發": st.column_config.TextColumn("🚀 月營收爆發", help="最新月營收創 12 個月新高，或營收 YoY 連續兩月加速"),
+                        "💥 盈餘意外": st.column_config.TextColumn("💥 盈餘意外", help="實際公佈每股盈餘與分析師預估值之意外比例 (%)")
                     }
                     if is_backtesting:
                         column_config_dict[perf_col_name] = st.column_config.NumberColumn(f"🎯 後續{holding_days}日報酬", format="%.2f%%")
                     else:
                         column_config_dict[perf_col_name] = st.column_config.NumberColumn("今日至今持平率", format="%.2f%%")
                         
-                    # 直接將未更動底色的原生 Dataframe 傳入 st.dataframe (移除不需要在 UI 秀出的輔助欄位)
-                    display_df = df_final.drop(columns=["原始名稱", "趨勢模板", "動能狀態判定"], errors="ignore")
+                    display_df = df_final.drop(columns=["ticker", "原始名稱", "趨勢模板", "動能狀態判定"], errors="ignore")
                     st.dataframe(display_df, use_container_width=True, hide_index=True, column_config=column_config_dict)
                     
-                    # 四象限戰略部署
                     st.divider()
                     st.subheader("🏁 Mark Minervini 流派：雙軌交叉戰略部署")
-                    st.caption(f"💡 註：括號內為 50MA 乖離率(%)。右側標註為【後續 {holding_days} 日回測實際報酬率】。")
+                    st.caption(f"💡 註：括號內為 50MA 乖離率(%)。右側標註為【後續 {holding_days} 日回測實際報酬率】。懸停於基本面標籤可檢視詳細數據與軌跡。")
                     
-                    # 🆕 抓取目前處置中個股清單 (上市 TWSE + 上櫃 TPEx)
                     with st.spinner("🚨 正在同步證交所/櫃買中心處置股公告..."):
                         DISPOSITION_MAP = fetch_disposition_data()
                     if DISPOSITION_MAP:
@@ -586,7 +880,6 @@ if submit_btn or st.session_state.first_run:
                     defensive_only = df_final[(df_final["對比 0050 超額強度"] <= 0) & (df_final["短線抗跌韌性分數"] >= dynamic_threshold)]
                     laggards = df_final[(df_final["對比 0050 超額強度"] <= 0) & (df_final["短線抗跌韌性分數"] < dynamic_threshold)]
                     
-                    # --- 核心修改：自訂輸出格式函式，讓股票後方資訊與第 11 行指標的結果完全一模一樣 ---
                     def format_stocks(df, show_perf=False):
                         if df.empty:
                             return "無"
@@ -595,13 +888,11 @@ if submit_btn or st.session_state.first_run:
                             perf_str = f" ➡️ 後續報酬: {row[perf_col_name]:.1f}%" if show_perf else ""
                             bias_val = row['50MA乖離率(%)']
                             
-                            # 判斷乖離率是否大於等於 30%，若是則加入淡紅色底色樣式標註
                             if bias_val >= 30.0:
                                 bias_str = f"<span style='background-color: #ffcccc; color: #990000; padding: 2px 4px; border-radius: 4px; font-weight: bold;'>{bias_val:.1f}%</span>"
                             else:
                                 bias_str = f"{bias_val:.1f}%"
 
-                            # 🆕 處置股狀態標記 (置於 50MA乖離率 之後)
                             disp_info = DISPOSITION_MAP.get(row['股票代號'])
                             if disp_info:
                                 period_text = f" ({disp_info['period']})" if disp_info.get('period') else ""
@@ -614,13 +905,53 @@ if submit_btn or st.session_state.first_run:
                             else:
                                 disp_str = ""
                                 
-                            # 🚀 精準還原：【 趨勢模板符號 股票名稱 【第11行的 indicator 結果】 】
-                            # 徹底解決原本格式重複疊加、與主表格名稱不一致的問題
+                            # 基本面 HTML 標籤與懸停提示 (Tooltips)
+                            ticker = row["ticker"]
+                            fund = FUNDAMENTAL_RESULTS.get(ticker, {})
+                            
+                            # 1. Code 33 Badge
+                            c33 = fund.get("c33", {})
+                            c33_active = c33.get("active", False)
+                            c33_traj = c33.get("trajectory", "").replace('"', '&quot;')
+                            if c33_active:
+                                c33_badge = f'<span style="background-color: #e6f7ff; color: #0050b3; border: 1px solid #91d5ff; padding: 2px 6px; border-radius: 4px; font-size: 0.85em; font-weight: bold; margin-left: 4px; cursor: help;" title="{c33_traj}">🧪 Code 33 ✅</span>'
+                            else:
+                                c33_badge = f'<span style="background-color: #f5f5f5; color: #595959; border: 1px solid #d9d9d9; padding: 2px 6px; border-radius: 4px; font-size: 0.85em; margin-left: 4px; cursor: help;" title="{c33_traj}">🧪 Code 33 ❌</span>'
+                                
+                            # 2. Monthly Revenue Badge
+                            mrev = fund.get("mrev", {})
+                            mrev_12h = mrev.get("is_12m_high", False)
+                            mrev_acc = mrev.get("is_accelerating", False)
+                            mrev_traj = mrev.get("trajectory", "").replace('"', '&quot;')
+                            if mrev_12h and mrev_acc:
+                                mrev_badge = f'<span style="background-color: #f6ffed; color: #389e0d; border: 1px solid #b7eb8f; padding: 2px 6px; border-radius: 4px; font-size: 0.85em; font-weight: bold; margin-left: 4px; cursor: help;" title="{mrev_traj}">🚀 月營收爆發</span>'
+                            elif mrev_12h:
+                                mrev_badge = f'<span style="background-color: #f6ffed; color: #389e0d; border: 1px solid #b7eb8f; padding: 2px 6px; border-radius: 4px; font-size: 0.85em; font-weight: bold; margin-left: 4px; cursor: help;" title="{mrev_traj}">🚀 營收新高</span>'
+                            elif mrev_acc:
+                                mrev_badge = f'<span style="background-color: #f6ffed; color: #389e0d; border: 1px solid #b7eb8f; padding: 2px 6px; border-radius: 4px; font-size: 0.85em; font-weight: bold; margin-left: 4px; cursor: help;" title="{mrev_traj}">🚀 營收YoY加速</span>'
+                            else:
+                                mrev_badge = f'<span style="background-color: #f5f5f5; color: #595959; border: 1px solid #d9d9d9; padding: 2px 6px; border-radius: 4px; font-size: 0.85em; margin-left: 4px; cursor: help;" title="{mrev_traj}">🚀 月營收 ❌</span>'
+                                
+                            # 3. Earnings Surprise Badge
+                            surprise = fund.get("surprise")
+                            if surprise:
+                                val = surprise["surprise"]
+                                est = surprise["estimate"]
+                                act = surprise["actual"]
+                                dt = surprise["date"]
+                                title_str = f"預估 EPS: {est:.2f}\\n實際 EPS: {act:.2f}\\n公佈日期: {dt}".replace('"', '&quot;')
+                                if val > 0:
+                                    surprise_badge = f'<span style="background-color: #fff7e6; color: #d46b08; border: 1px solid #ffd591; padding: 2px 6px; border-radius: 4px; font-size: 0.85em; font-weight: bold; margin-left: 4px; cursor: help;" title="{title_str}">💥 盈餘意外 +{val:.1f}%</span>'
+                                else:
+                                    surprise_badge = f'<span style="background-color: #fff0f6; color: #c41d7f; border: 1px solid #ffadd2; padding: 2px 6px; border-radius: 4px; font-size: 0.85em; font-weight: bold; margin-left: 4px; cursor: help;" title="{title_str}">💥 盈餘意外 {val:.1f}%</span>'
+                            else:
+                                surprise_badge = f'<span style="background-color: #f5f5f5; color: #595959; border: 1px solid #d9d9d9; padding: 2px 6px; border-radius: 4px; font-size: 0.85em; margin-left: 4px; cursor: help;" title="無分析師預估資料">💥 盈餘意外 N/A</span>'
+                                
+                            fund_badges = f"{c33_badge}{mrev_badge}{surprise_badge}"
                             formatted_name = f"{row['趨勢模板']} {row['原始名稱']} 【{row['動能狀態判定']}】"
-                            lines.append(f"* {formatted_name} ({bias_str}){disp_str}{perf_str}")
+                            lines.append(f"* {formatted_name} ({bias_str}){disp_str}{fund_badges}{perf_str}")
                         return "\n".join(lines)
 
-                    # 💡 注意：由於使用了 HTML 標籤樣式，此處輸出調整為 st.write / st.markdown 以支援 HTML 渲染
                     c1, c2 = st.columns(2)
                     c1.success(f"### 👑 第一象限：逆風真龍頭 ({len(true_leaders)} 檔)"); c1.markdown(format_stocks(true_leaders, is_backtesting), unsafe_allow_html=True); c1.caption("👉 戰略部署：長線動能擊敗大盤，且短線抗跌表現達到當前動態合格線以上。隨時注意 VCP 出量突破。")
                     c1.info(f"### 🚀 第二象限：高 Beta 攻擊兵 ({len(momentum_only)} 檔)"); c1.markdown(format_stocks(momentum_only, is_backtesting), unsafe_allow_html=True); c1.caption("👉 戰略部署：長線極強，但修正波動高於大盤. 一旦大盤止穩，這群股票往往是右側出量追擊的首選。")
