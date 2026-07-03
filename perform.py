@@ -721,7 +721,7 @@ with st.sidebar.form("sepa_integrated_form"):
     stock_input = st.text_area("股票清單 (支援複製貼上！系統會自動過濾國籍、財報等非代號雜訊)", value=default_pool, height=300)
     
     st.subheader("【短線逆風照妖鏡參數】")
-    lookback_days = st.number_input("自訂照妖鏡觀察天數", min_value=5, max_value=365, value=60, step=1)
+    lookback_days = st.number_input("自訂照妖鏡觀察天數", min_value=5, max_value=365, value=45, step=1)
     market_threshold = st.slider("大盤恐慌日定義 (單日跌幅 %)", min_value=0.5, max_value=2.5, value=1.0, step=0.1)
     
     show_fundamental = st.checkbox("🔬 顯示基本面分析標籤", value=False, help="開啟後，下方象限列表個股名稱下方將顯示 Code 33 與 月營收之詳細徽章")
@@ -763,42 +763,16 @@ with st.sidebar.expander("🔌 數據引擎與資料時間診斷", expanded=True
         except Exception as e:
             diag_info["FinMind (月營收)"] = f"🔴 連線失敗: {type(e).__name__}"
             
-        # 2. TDCC
-        try:
-            url = "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock"
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Referer": "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock"
-            }
-            import urllib3
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-            r = requests.get(url, headers=headers, verify=False, timeout=5)
-            if r.status_code == 200:
-                soup = BeautifulSoup(r.text, 'html.parser')
-                select_tag = soup.find('select', {'name': 'scaDate'})
-                if select_tag:
-                    dates = [opt.get('value') for opt in select_tag.find_all('option')]
-                    if dates:
-                        diag_info["台灣集保所"] = f"🟢 正常 (最新日期: {dates[0]})"
-                    else:
-                        diag_info["台灣集保所"] = "🟡 無日期選項"
-                else:
-                    diag_info["台灣集保所"] = "🔴 解析失敗 (無選單)"
-            else:
-                diag_info["台灣集保所"] = f"🔴 錯誤 (HTTP {r.status_code})"
-        except Exception as e:
-            diag_info["台灣集保所"] = f"🔴 連線失敗: {type(e).__name__}"
-            
-        # 3. yfinance (改用歷史價格測試，避開有依賴問題的 get_earnings_dates)
+        # 2. yfinance (改用歷史價格測試，避開有依賴問題的 get_earnings_dates)
         try:
             tick = yf.Ticker("2330.TW")
             h = tick.history(period="1d")
             if not h.empty:
-                diag_info["yfinance (價格)"] = f"🟢 正常 (最新交易日: {h.index[-1].strftime('%Y-%m-%d')})"
+                diag_info["yfinance (價格與財報)"] = f"🟢 正常 (最新交易日: {h.index[-1].strftime('%Y-%m-%d')})"
             else:
-                diag_info["yfinance (價格)"] = "🟡 無交易數據"
+                diag_info["yfinance (價格與財報)"] = "🟡 無交易數據"
         except Exception as e:
-            diag_info["yfinance (價格)"] = f"🔴 連線失敗: {type(e).__name__}"
+            diag_info["yfinance (價格與財報)"] = f"🔴 連線失敗: {type(e).__name__}"
             
         return diag_info
         
@@ -905,9 +879,12 @@ if submit_btn or st.session_state.first_run:
                     dynamic_threshold = 55.0 if total_panic_days <= 5 else (70.0 if total_panic_days <= 15 else 80.0)
                     level_desc = "⚡ 極短線回檔（採取寬鬆防守標準，勝率過半即合格）" if total_panic_days <= 5 else ("⚖️ 標準波段修正（採取黃金 70% 機構防守標準）" if total_panic_days <= 15 else "🚨 空頭大屠殺 / 系統性風險（採取極嚴苛 80% 沙裡淘金標準）")
                     
-                    # 🚀 多線程併發加載基本面數據
-                    tickers_for_fundamentals = [stock["id"] for stock in STOCKS_POOL]
-                    FUNDAMENTAL_RESULTS = fetch_all_fundamentals(tickers_for_fundamentals, backtest_date)
+                    # 🚀 多線程併發加載基本面數據 (僅當使用者開啟基本面分析標籤時執行，未開啟時跳過以發揮百檔極速)
+                    if show_fundamental:
+                        tickers_for_fundamentals = [stock["id"] for stock in STOCKS_POOL]
+                        FUNDAMENTAL_RESULTS = fetch_all_fundamentals(tickers_for_fundamentals, backtest_date)
+                    else:
+                        FUNDAMENTAL_RESULTS = {}
                     
                     integrated_results = []
                     skipped_stocks = []
