@@ -8,6 +8,7 @@ import re
 import requests
 from io import StringIO
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 
 # 1. 網頁初始設定
 st.set_page_config(page_title="🏆 SEPA 雙軌強勢股終端機", layout="wide")
@@ -236,12 +237,12 @@ def fetch_finmind_monthly_revenue(stock_id):
         pass
     return []
 
-@st.cache_data(ttl=1800) # 盈餘意外預估，快取30分鐘
+@lru_cache(maxsize=256) # 使用 lru_cache 取代 st.cache_data：@st.cache_data 在 ThreadPoolExecutor 執行緒中不可靠
 def fetch_yfinance_surprise(ticker):
-    """獲取 yfinance 盈餘意外與分析師預估數據"""
+    """獲取 yfinance 盈餘意外與分析師預估數據（使用 lru_cache 確保線程安全）"""
     try:
         tick = yf.Ticker(ticker)
-        ed = tick.get_earnings_dates(limit=5)
+        ed = tick.get_earnings_dates(limit=8)
         if ed is not None and not ed.empty:
             return ed.to_json(date_format='iso')
     except Exception:
@@ -770,7 +771,7 @@ if submit_btn or st.session_state.first_run:
                             surp_val = surprise_data["surprise"]
                             surprise_display = f"+{surp_val:.1f}%" if surp_val > 0 else f"{surp_val:.1f}%"
                         else:
-                            surprise_display = "N/A"
+                            surprise_display = "—"
 
                         integrated_results.append({
                             "ticker": ticker, # 隱藏欄位
@@ -854,9 +855,9 @@ if submit_btn or st.session_state.first_run:
                         "50MA乖離率(%)": st.column_config.NumberColumn("50MA乖離率", format="%.2f%%"),
                         "IBD式 絕對分數": st.column_config.NumberColumn("IBD式 絕對強度", format="%.1f"),
                         "短線抗跌韌性分數": st.column_config.ProgressColumn("抗跌得分", min_value=0, max_value=100, format="%.0f分"),
-                        "🧪 Code 33": st.column_config.TextColumn("🧪 Code 33", help="連續三季的 EPS YoY、營收 YoY、淨利率 是否同步呈現遞增趨勢"),
-                        "🚀 月營收爆發": st.column_config.TextColumn("🚀 月營收爆發", help="最新月營收創 12 個月新高，或營收 YoY 連續兩月加速"),
-                        "💥 盈餘意外": st.column_config.TextColumn("💥 盈餘意外", help="實際公佈每股盈餘與分析師預估值之意外比例 (%)")
+                        "🧪 Code 33": st.column_config.TextColumn("🧪 Code 33", help="連續三季的 EPS YoY、營收 YoY、淨利率是否同步呈現遞增趨勢。✅=三加速確認 / ❌=未達標"),
+                        "🚀 月營收爆發": st.column_config.TextColumn("🚀 月營收爆發", help="月營收動能：✅ 雙重爆發=創12M新高且YoY加速 | ✅ 創12M新高 | ✅ YoY連2月加速 | ❌=未達任一條件"),
+                        "💥 盈餘意外": st.column_config.TextColumn("💥 盈餘意外", help="有分析師預估值且已公佈實際EPS時顯示。— 表示無預估值（台股此欄偶爾為空屬正常）")
                     }
                     if is_backtesting:
                         column_config_dict[perf_col_name] = st.column_config.NumberColumn(f"🎯 後續{holding_days}日報酬", format="%.2f%%")
@@ -868,7 +869,18 @@ if submit_btn or st.session_state.first_run:
                     
                     st.divider()
                     st.subheader("🏁 Mark Minervini 流派：雙軌交叉戰略部署")
-                    st.caption(f"💡 註：括號內為 50MA 乖離率(%)。右側標註為【後續 {holding_days} 日回測實際報酬率】。懸停於基本面標籤可檢視詳細數據與軌跡。")
+                    st.markdown(
+                        f"<span style='color: #666666; font-size: 0.85em; display: block; margin-top: -10px; margin-bottom: 12px;'>"
+                        f"💡 <b>徽章圖例</b>（各象限股票資訊解讀指引）："
+                        f"<br>&nbsp;&nbsp;&nbsp;&nbsp;🏷️ <b>排版順序</b>：股名 → 動能狀態 → 50MA乖離率 → 🚨處置警示 → 基本面徽章 → 回測報酬"
+                        f"<br>&nbsp;&nbsp;&nbsp;&nbsp;📐 <b>50MA乖離率</b>：藍=正常範圍，<span style='color:#cf1322;font-weight:bold;'>紅=乖離 ≥30%（追高風險高）</span>"
+                        f"<br>&nbsp;&nbsp;&nbsp;&nbsp;🧪 <b>Code 33</b>（藍徽章）：連續三季 EPS YoY / 營收 YoY / 淨利率<b>三加速</b>確認，僅符合時顯示"
+                        f"<br>&nbsp;&nbsp;&nbsp;&nbsp;🚀 <b>月營收</b>（綠徽章）：月營收<b>創12M新高</b>或<b>YoY連兩月加速</b>，未達標不顯示"
+                        f"<br>&nbsp;&nbsp;&nbsp;&nbsp;💥 <b>盈餘意外</b>（橙/紫徽章）：實際EPS<b>優於/遜於</b>分析師預估，無預估值時不顯示"
+                        f"<br>&nbsp;&nbsp;&nbsp;&nbsp;📊 <b>回測報酬</b>（綠=正 / 紅=負）：回溯基準日後 {holding_days} 個交易日實際持有報酬"
+                        f"</span>",
+                        unsafe_allow_html=True
+                    )
                     
                     with st.spinner("🚨 正在同步證交所/櫃買中心處置股公告..."):
                         DISPOSITION_MAP = fetch_disposition_data()
@@ -885,54 +897,51 @@ if submit_btn or st.session_state.first_run:
                             return "無"
                         lines = []
                         for _, row in df.iterrows():
-                            perf_str = f" ➡️ 後續報酬: {row[perf_col_name]:.1f}%" if show_perf else ""
+                            # 1. 50MA 乖離率徽章
                             bias_val = row['50MA乖離率(%)']
-                            
                             if bias_val >= 30.0:
-                                bias_str = f"<span style='background-color: #ffcccc; color: #990000; padding: 2px 4px; border-radius: 4px; font-weight: bold;'>{bias_val:.1f}%</span>"
+                                bias_badge = f'<span style="background-color: #fff1f0; color: #cf1322; border: 1px solid #ffa39e; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; margin-left: 4px; display: inline-block;">50MA: {bias_val:.1f}%</span>'
                             else:
-                                bias_str = f"{bias_val:.1f}%"
+                                bias_badge = f'<span style="background-color: #e6f7ff; color: #0050b3; border: 1px solid #91d5ff; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; margin-left: 4px; display: inline-block;">50MA: {bias_val:.1f}%</span>'
 
+                            # 2. 處置股徽章
                             disp_info = DISPOSITION_MAP.get(row['股票代號'])
                             if disp_info:
                                 period_text = f" ({disp_info['period']})" if disp_info.get('period') else ""
                                 disp_str = (
-                                    f" <span style='background-color: #fff1f0; color: #e74c3c; border: 1px solid #ffbaba; "
-                                    f"padding: 2px 6px; border-radius: 6px; font-size: 0.85em; font-weight: 600; "
-                                    f"margin-left: 4px; box-shadow: 0 1px 2px rgba(0,0,0,0.05);'>"
-                                    f"🚨 處置中{period_text}</span>"
+                                    f'<span style="background-color: #fff1f0; color: #e74c3c; border: 1px solid #ffbaba; '
+                                    f'padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: 600; '
+                                    f'margin-left: 4px; display: inline-block;" title="處置起迄時間: {period_text.strip()}">🚨 處置中</span>'
                                 )
                             else:
                                 disp_str = ""
                                 
-                            # 基本面 HTML 標籤與懸停提示 (Tooltips)
+                            # 基本面 HTML 標籤與懸停提示 (Tooltips) - 僅在符合時顯示
                             ticker = row["ticker"]
                             fund = FUNDAMENTAL_RESULTS.get(ticker, {})
                             
-                            # 1. Code 33 Badge
+                            fund_badges_list = []
+                            
+                            # 🧪 Code 33 Badge (僅符合時顯示)
                             c33 = fund.get("c33", {})
                             c33_active = c33.get("active", False)
                             c33_traj = c33.get("trajectory", "").replace('"', '&quot;')
                             if c33_active:
-                                c33_badge = f'<span style="background-color: #e6f7ff; color: #0050b3; border: 1px solid #91d5ff; padding: 2px 6px; border-radius: 4px; font-size: 0.85em; font-weight: bold; margin-left: 4px; cursor: help;" title="{c33_traj}">🧪 Code 33 ✅</span>'
-                            else:
-                                c33_badge = f'<span style="background-color: #f5f5f5; color: #595959; border: 1px solid #d9d9d9; padding: 2px 6px; border-radius: 4px; font-size: 0.85em; margin-left: 4px; cursor: help;" title="{c33_traj}">🧪 Code 33 ❌</span>'
+                                fund_badges_list.append(f'<span style="background-color: #e6f7ff; color: #0050b3; border: 1px solid #91d5ff; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; margin-left: 4px; cursor: help; display: inline-block;" title="【Code 33 盈餘/營收/淨利加速】&#10;{c33_traj}">🧪 Code 33</span>')
                                 
-                            # 2. Monthly Revenue Badge
+                            # 🚀 Monthly Revenue Badge (僅新高或YoY加速時顯示)
                             mrev = fund.get("mrev", {})
                             mrev_12h = mrev.get("is_12m_high", False)
                             mrev_acc = mrev.get("is_accelerating", False)
                             mrev_traj = mrev.get("trajectory", "").replace('"', '&quot;')
                             if mrev_12h and mrev_acc:
-                                mrev_badge = f'<span style="background-color: #f6ffed; color: #389e0d; border: 1px solid #b7eb8f; padding: 2px 6px; border-radius: 4px; font-size: 0.85em; font-weight: bold; margin-left: 4px; cursor: help;" title="{mrev_traj}">🚀 月營收爆發</span>'
+                                fund_badges_list.append(f'<span style="background-color: #f6ffed; color: #389e0d; border: 1px solid #b7eb8f; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; margin-left: 4px; cursor: help; display: inline-block;" title="【月營收新高 &amp; YoY加速】&#10;{mrev_traj}">🚀 月營收爆發</span>')
                             elif mrev_12h:
-                                mrev_badge = f'<span style="background-color: #f6ffed; color: #389e0d; border: 1px solid #b7eb8f; padding: 2px 6px; border-radius: 4px; font-size: 0.85em; font-weight: bold; margin-left: 4px; cursor: help;" title="{mrev_traj}">🚀 營收新高</span>'
+                                fund_badges_list.append(f'<span style="background-color: #f6ffed; color: #389e0d; border: 1px solid #b7eb8f; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; margin-left: 4px; cursor: help; display: inline-block;" title="【月營收創12M新高】&#10;{mrev_traj}">🚀 營收新高</span>')
                             elif mrev_acc:
-                                mrev_badge = f'<span style="background-color: #f6ffed; color: #389e0d; border: 1px solid #b7eb8f; padding: 2px 6px; border-radius: 4px; font-size: 0.85em; font-weight: bold; margin-left: 4px; cursor: help;" title="{mrev_traj}">🚀 營收YoY加速</span>'
-                            else:
-                                mrev_badge = f'<span style="background-color: #f5f5f5; color: #595959; border: 1px solid #d9d9d9; padding: 2px 6px; border-radius: 4px; font-size: 0.85em; margin-left: 4px; cursor: help;" title="{mrev_traj}">🚀 月營收 ❌</span>'
+                                fund_badges_list.append(f'<span style="background-color: #f6ffed; color: #389e0d; border: 1px solid #b7eb8f; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; margin-left: 4px; cursor: help; display: inline-block;" title="【營收YoY連續兩月加速】&#10;{mrev_traj}">🚀 營收YoY加速</span>')
                                 
-                            # 3. Earnings Surprise Badge
+                            # 💥 Earnings Surprise Badge (僅有預估值且實際公佈時顯示)
                             surprise = fund.get("surprise")
                             if surprise:
                                 val = surprise["surprise"]
@@ -941,15 +950,30 @@ if submit_btn or st.session_state.first_run:
                                 dt = surprise["date"]
                                 title_str = f"預估 EPS: {est:.2f}\\n實際 EPS: {act:.2f}\\n公佈日期: {dt}".replace('"', '&quot;')
                                 if val > 0:
-                                    surprise_badge = f'<span style="background-color: #fff7e6; color: #d46b08; border: 1px solid #ffd591; padding: 2px 6px; border-radius: 4px; font-size: 0.85em; font-weight: bold; margin-left: 4px; cursor: help;" title="{title_str}">💥 盈餘意外 +{val:.1f}%</span>'
+                                    fund_badges_list.append(f'<span style="background-color: #fff7e6; color: #d46b08; border: 1px solid #ffd591; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; margin-left: 4px; cursor: help; display: inline-block;" title="{title_str}">💥 意外 +{val:.1f}%</span>')
                                 else:
-                                    surprise_badge = f'<span style="background-color: #fff0f6; color: #c41d7f; border: 1px solid #ffadd2; padding: 2px 6px; border-radius: 4px; font-size: 0.85em; font-weight: bold; margin-left: 4px; cursor: help;" title="{title_str}">💥 盈餘意外 {val:.1f}%</span>'
-                            else:
-                                surprise_badge = f'<span style="background-color: #f5f5f5; color: #595959; border: 1px solid #d9d9d9; padding: 2px 6px; border-radius: 4px; font-size: 0.85em; margin-left: 4px; cursor: help;" title="無分析師預估資料">💥 盈餘意外 N/A</span>'
+                                    fund_badges_list.append(f'<span style="background-color: #fff0f6; color: #c41d7f; border: 1px solid #ffadd2; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; margin-left: 4px; cursor: help; display: inline-block;" title="{title_str}">💥 意外 {val:.1f}%</span>')
                                 
-                            fund_badges = f"{c33_badge}{mrev_badge}{surprise_badge}"
-                            formatted_name = f"{row['趨勢模板']} {row['原始名稱']} 【{row['動能狀態判定']}】"
-                            lines.append(f"* {formatted_name} ({bias_str}){disp_str}{fund_badges}{perf_str}")
+                            fund_badges = "".join(fund_badges_list)
+                            
+                            # 3. 動能狀態徽章
+                            status_str = row['動能狀態判定']
+                            status_badge = f'<span style="background-color: #f5f5f5; color: #666666; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; margin-left: 4px; display: inline-block;">{status_str}</span>'
+                            
+                            # 4. 回測績效徽章 (僅在回測時顯示)
+                            if show_perf:
+                                ret_val = row[perf_col_name]
+                                if ret_val > 0:
+                                    perf_badge = f'<span style="background-color: #f6ffed; color: #389e0d; border: 1px solid #b7eb8f; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; margin-left: 4px; display: inline-block;">報酬: +{ret_val:.1f}%</span>'
+                                elif ret_val < 0:
+                                    perf_badge = f'<span style="background-color: #fff1f0; color: #cf1322; border: 1px solid #ffa39e; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; margin-left: 4px; display: inline-block;">報酬: {ret_val:.1f}%</span>'
+                                else:
+                                    perf_badge = f'<span style="background-color: #f5f5f5; color: #595959; border: 1px solid #d9d9d9; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; margin-left: 4px; display: inline-block;">報酬: 0.0%</span>'
+                            else:
+                                perf_badge = ""
+
+                            formatted_name = f"{row['趨勢模板']} <b>{row['原始名稱']}</b>"
+                            lines.append(f"* {formatted_name} {status_badge} {bias_badge} {disp_str} {fund_badges} {perf_badge}")
                         return "\n".join(lines)
 
                     c1, c2 = st.columns(2)
