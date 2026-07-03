@@ -202,6 +202,10 @@ def fetch_disposition_data():
 
     return disposition_map
 
+DISPOSITION_MAP = fetch_disposition_data()
+if DISPOSITION_MAP:
+    st.sidebar.caption(f"🚨 處置股監控：目前偵測到 {len(DISPOSITION_MAP):,} 檔全市場處置中證券")
+
 # --- 🚀 基本面 API 數據獲取與自訂防鎖死快取 ---
 
 _FINMIND_FINANCIALS_CACHE = {}
@@ -1077,11 +1081,6 @@ if submit_btn or st.session_state.first_run:
                     else:
                         st.caption(f"💡 括號內為 50MA 乖離率(%)。右側標註為【後續 {holding_days} 日回測實際報酬率】。可在左側開啟「🔬 顯示基本面分析標籤」查看更多維度資訊。")
                     
-                    with st.spinner("🚨 正在同步證交所/櫃買中心處置股公告..."):
-                        DISPOSITION_MAP = fetch_disposition_data()
-                    if DISPOSITION_MAP:
-                        st.sidebar.caption(f"🚨 處置股監控：目前偵測到 {len(DISPOSITION_MAP):,} 檔全市場處置中證券")
-
                     true_leaders = df_final[(df_final["對比 0050 超額強度"] > 0) & (df_final["短線抗跌韌性分數"] >= dynamic_threshold)]
                     momentum_only = df_final[(df_final["對比 0050 超額強度"] > 0) & (df_final["短線抗跌韌性分數"] < dynamic_threshold)]
                     defensive_only = df_final[(df_final["對比 0050 超額強度"] <= 0) & (df_final["短線抗跌韌性分數"] >= dynamic_threshold)]
