@@ -527,6 +527,9 @@ with st.sidebar.form("sepa_integrated_form"):
     is_backtesting = backtest_date < datetime.today().date()
     submit_btn = st.form_submit_button("🚀 執行雙軌交叉選股分析")
 
+# 基本面分析開關 (在 form 外，獨立 widget)
+show_fundamental = st.sidebar.toggle("🔬 顯示基本面分析標籤", value=False, help="開啟後，象限列表中每支股票下方將顯示 Code 33 / 月營收爆發 / 盈餘意外等基本面標籤（懸停可檢視詳細數據）")
+
 def get_stocks_pool(text):
     """智能掃描器：自動比對輸入文字與 STOCK_DICT 名稱"""
     pool = []
@@ -795,17 +798,13 @@ if submit_btn or st.session_state.first_run:
                     cols = df_final.columns.tolist()
                     perf_col_name = f"後續{holding_days}日實際報酬(%)"
                     
-                    # 重新安排基本面欄位順序至顯眼處
                     fundamental_cols = ["🧪 Code 33", "🚀 月營收爆發", "💥 盈餘意外"]
                     for f_col in fundamental_cols:
                         if f_col in cols:
                             cols.remove(f_col)
-                    
-                    # 插入至股票名稱後面
                     idx_to_insert = cols.index("股票名稱") + 1
                     for f_col in reversed(fundamental_cols):
                         cols.insert(idx_to_insert, f_col)
-                    
                     if "50MA乖離率(%)" in cols:
                         cols.remove("50MA乖離率(%)")
                         cols.append("50MA乖離率(%)")
@@ -855,9 +854,9 @@ if submit_btn or st.session_state.first_run:
                         "50MA乖離率(%)": st.column_config.NumberColumn("50MA乖離率", format="%.2f%%"),
                         "IBD式 絕對分數": st.column_config.NumberColumn("IBD式 絕對強度", format="%.1f"),
                         "短線抗跌韌性分數": st.column_config.ProgressColumn("抗跌得分", min_value=0, max_value=100, format="%.0f分"),
-                        "🧪 Code 33": st.column_config.TextColumn("🧪 Code 33", help="連續三季的 EPS YoY、營收 YoY、淨利率是否同步呈現遞增趨勢。✅=三加速確認 / ❌=未達標"),
-                        "🚀 月營收爆發": st.column_config.TextColumn("🚀 月營收爆發", help="月營收動能：✅ 雙重爆發=創12M新高且YoY加速 | ✅ 創12M新高 | ✅ YoY連2月加速 | ❌=未達任一條件"),
-                        "💥 盈餘意外": st.column_config.TextColumn("💥 盈餘意外", help="有分析師預估值且已公佈實際EPS時顯示。— 表示無預估值（台股此欄偶爾為空屬正常）")
+                        "🧪 Code 33": st.column_config.TextColumn("🧪 Code 33", help="連續三季的 EPS YoY、營收 YoY、淨利率是否同步呈現遞增趨勢。✅=三加速確認"),
+                        "🚀 月營收爆發": st.column_config.TextColumn("🚀 月營收爆發", help="月營收創12M新高 或 YoY連2月加速"),
+                        "💥 盈餘意外": st.column_config.TextColumn("💥 盈餘意外", help="有分析師預估值且已公佈實際EPS時顯示。— 表示無預估值")
                     }
                     if is_backtesting:
                         column_config_dict[perf_col_name] = st.column_config.NumberColumn(f"🎯 後續{holding_days}日報酬", format="%.2f%%")
@@ -869,18 +868,20 @@ if submit_btn or st.session_state.first_run:
                     
                     st.divider()
                     st.subheader("🏁 Mark Minervini 流派：雙軌交叉戰略部署")
-                    st.markdown(
-                        f"<span style='color: #666666; font-size: 0.85em; display: block; margin-top: -10px; margin-bottom: 12px;'>"
-                        f"💡 <b>徽章圖例</b>（各象限股票資訊解讀指引）："
-                        f"<br>&nbsp;&nbsp;&nbsp;&nbsp;🏷️ <b>排版順序</b>：股名 → 動能狀態 → 50MA乖離率 → 🚨處置警示 → 基本面徽章 → 回測報酬"
-                        f"<br>&nbsp;&nbsp;&nbsp;&nbsp;📐 <b>50MA乖離率</b>：藍=正常範圍，<span style='color:#cf1322;font-weight:bold;'>紅=乖離 ≥30%（追高風險高）</span>"
-                        f"<br>&nbsp;&nbsp;&nbsp;&nbsp;🧪 <b>Code 33</b>（藍徽章）：連續三季 EPS YoY / 營收 YoY / 淨利率<b>三加速</b>確認，僅符合時顯示"
-                        f"<br>&nbsp;&nbsp;&nbsp;&nbsp;🚀 <b>月營收</b>（綠徽章）：月營收<b>創12M新高</b>或<b>YoY連兩月加速</b>，未達標不顯示"
-                        f"<br>&nbsp;&nbsp;&nbsp;&nbsp;💥 <b>盈餘意外</b>（橙/紫徽章）：實際EPS<b>優於/遜於</b>分析師預估，無預估值時不顯示"
-                        f"<br>&nbsp;&nbsp;&nbsp;&nbsp;📊 <b>回測報酬</b>（綠=正 / 紅=負）：回溯基準日後 {holding_days} 個交易日實際持有報酬"
-                        f"</span>",
-                        unsafe_allow_html=True
-                    )
+                    
+                    # 說明文字：依基本面開關狀態而異
+                    if show_fundamental:
+                        st.markdown(
+                            "<span style='color:#555;font-size:0.84em;'>"
+                            "💡 <b>基本面標籤說明</b>（懸停可檢視詳細軌跡）：&nbsp;"
+                            "🧪 <b>Code 33</b> = 連3季 EPS/營收/淨利率三加速&nbsp;｜&nbsp;"
+                            "🚀 <b>月營收</b> = 創12M新高 或 YoY連2月加速&nbsp;｜&nbsp;"
+                            "💥 <b>盈餘意外</b> = 實際EPS優於/遜於預估（無預估值不顯示）"
+                            "</span>",
+                            unsafe_allow_html=True
+                        )
+                    else:
+                        st.caption(f"💡 括號內為 50MA 乖離率(%)。右側標註為【後續 {holding_days} 日回測實際報酬率】。可在左側開啟「🔬 顯示基本面分析標籤」查看 Code 33 / 月營收 / 盈餘意外。")
                     
                     with st.spinner("🚨 正在同步證交所/櫃買中心處置股公告..."):
                         DISPOSITION_MAP = fetch_disposition_data()
@@ -897,83 +898,114 @@ if submit_btn or st.session_state.first_run:
                             return "無"
                         lines = []
                         for _, row in df.iterrows():
-                            # 1. 50MA 乖離率徽章
+                            # 50MA 乖離率：括號格式，高乖離染紅
                             bias_val = row['50MA乖離率(%)']
                             if bias_val >= 30.0:
-                                bias_badge = f'<span style="background-color: #fff1f0; color: #cf1322; border: 1px solid #ffa39e; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; margin-left: 4px; display: inline-block;">50MA: {bias_val:.1f}%</span>'
+                                bias_str = f"(<span style='color:#cf1322;font-weight:bold;'>{bias_val:.1f}%</span>)"
                             else:
-                                bias_badge = f'<span style="background-color: #e6f7ff; color: #0050b3; border: 1px solid #91d5ff; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; margin-left: 4px; display: inline-block;">50MA: {bias_val:.1f}%</span>'
+                                bias_str = f"({bias_val:.1f}%)"
 
-                            # 2. 處置股徽章
+                            # 處置股：inline 文字警示（懸停顯示起迄時間）
                             disp_info = DISPOSITION_MAP.get(row['股票代號'])
                             if disp_info:
-                                period_text = f" ({disp_info['period']})" if disp_info.get('period') else ""
+                                period_text = disp_info['period'] if disp_info.get('period') else ""
                                 disp_str = (
-                                    f'<span style="background-color: #fff1f0; color: #e74c3c; border: 1px solid #ffbaba; '
-                                    f'padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: 600; '
-                                    f'margin-left: 4px; display: inline-block;" title="處置起迄時間: {period_text.strip()}">🚨 處置中</span>'
+                                    f" <span style='color:#e74c3c;font-weight:600;'"
+                                    f" title='處置起迄：{period_text}'>🚨 處置中</span>"
                                 )
                             else:
                                 disp_str = ""
-                                
-                            # 基本面 HTML 標籤與懸停提示 (Tooltips) - 僅在符合時顯示
-                            ticker = row["ticker"]
-                            fund = FUNDAMENTAL_RESULTS.get(ticker, {})
-                            
-                            fund_badges_list = []
-                            
-                            # 🧪 Code 33 Badge (僅符合時顯示)
-                            c33 = fund.get("c33", {})
-                            c33_active = c33.get("active", False)
-                            c33_traj = c33.get("trajectory", "").replace('"', '&quot;')
-                            if c33_active:
-                                fund_badges_list.append(f'<span style="background-color: #e6f7ff; color: #0050b3; border: 1px solid #91d5ff; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; margin-left: 4px; cursor: help; display: inline-block;" title="【Code 33 盈餘/營收/淨利加速】&#10;{c33_traj}">🧪 Code 33</span>')
-                                
-                            # 🚀 Monthly Revenue Badge (僅新高或YoY加速時顯示)
-                            mrev = fund.get("mrev", {})
-                            mrev_12h = mrev.get("is_12m_high", False)
-                            mrev_acc = mrev.get("is_accelerating", False)
-                            mrev_traj = mrev.get("trajectory", "").replace('"', '&quot;')
-                            if mrev_12h and mrev_acc:
-                                fund_badges_list.append(f'<span style="background-color: #f6ffed; color: #389e0d; border: 1px solid #b7eb8f; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; margin-left: 4px; cursor: help; display: inline-block;" title="【月營收新高 &amp; YoY加速】&#10;{mrev_traj}">🚀 月營收爆發</span>')
-                            elif mrev_12h:
-                                fund_badges_list.append(f'<span style="background-color: #f6ffed; color: #389e0d; border: 1px solid #b7eb8f; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; margin-left: 4px; cursor: help; display: inline-block;" title="【月營收創12M新高】&#10;{mrev_traj}">🚀 營收新高</span>')
-                            elif mrev_acc:
-                                fund_badges_list.append(f'<span style="background-color: #f6ffed; color: #389e0d; border: 1px solid #b7eb8f; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; margin-left: 4px; cursor: help; display: inline-block;" title="【營收YoY連續兩月加速】&#10;{mrev_traj}">🚀 營收YoY加速</span>')
-                                
-                            # 💥 Earnings Surprise Badge (僅有預估值且實際公佈時顯示)
-                            surprise = fund.get("surprise")
-                            if surprise:
-                                val = surprise["surprise"]
-                                est = surprise["estimate"]
-                                act = surprise["actual"]
-                                dt = surprise["date"]
-                                title_str = f"預估 EPS: {est:.2f}\\n實際 EPS: {act:.2f}\\n公佈日期: {dt}".replace('"', '&quot;')
-                                if val > 0:
-                                    fund_badges_list.append(f'<span style="background-color: #fff7e6; color: #d46b08; border: 1px solid #ffd591; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; margin-left: 4px; cursor: help; display: inline-block;" title="{title_str}">💥 意外 +{val:.1f}%</span>')
-                                else:
-                                    fund_badges_list.append(f'<span style="background-color: #fff0f6; color: #c41d7f; border: 1px solid #ffadd2; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; margin-left: 4px; cursor: help; display: inline-block;" title="{title_str}">💥 意外 {val:.1f}%</span>')
-                                
-                            fund_badges = "".join(fund_badges_list)
-                            
-                            # 3. 動能狀態徽章
-                            status_str = row['動能狀態判定']
-                            status_badge = f'<span style="background-color: #f5f5f5; color: #666666; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; margin-left: 4px; display: inline-block;">{status_str}</span>'
-                            
-                            # 4. 回測績效徽章 (僅在回測時顯示)
+
+                            # 回測績效：inline 彩色箭頭
                             if show_perf:
                                 ret_val = row[perf_col_name]
                                 if ret_val > 0:
-                                    perf_badge = f'<span style="background-color: #f6ffed; color: #389e0d; border: 1px solid #b7eb8f; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; margin-left: 4px; display: inline-block;">報酬: +{ret_val:.1f}%</span>'
+                                    perf_str = f" <span style='color:#389e0d;font-weight:bold;'>▲ {ret_val:.1f}%</span>"
                                 elif ret_val < 0:
-                                    perf_badge = f'<span style="background-color: #fff1f0; color: #cf1322; border: 1px solid #ffa39e; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; margin-left: 4px; display: inline-block;">報酬: {ret_val:.1f}%</span>'
+                                    perf_str = f" <span style='color:#cf1322;font-weight:bold;'>▼ {ret_val:.1f}%</span>"
                                 else:
-                                    perf_badge = f'<span style="background-color: #f5f5f5; color: #595959; border: 1px solid #d9d9d9; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; margin-left: 4px; display: inline-block;">報酬: 0.0%</span>'
+                                    perf_str = f" <span style='color:#888;'>— 0.0%</span>"
                             else:
-                                perf_badge = ""
+                                perf_str = ""
 
-                            formatted_name = f"{row['趨勢模板']} <b>{row['原始名稱']}</b>"
-                            lines.append(f"* {formatted_name} {status_badge} {bias_badge} {disp_str} {fund_badges} {perf_badge}")
+                            # 主行：經典格式 ✅/❌ 股名 【動能狀態】 (50MA%) 🚨處置中 ▲報酬
+                            status_str = row['動能狀態判定']
+                            main_line = (
+                                f"{row['趨勢模板']} <b>{row['原始名稱']}</b> "
+                                f"【{status_str}】 {bias_str}{disp_str}{perf_str}"
+                            )
+                            lines.append(f"* {main_line}")
+
+                            # 基本面子行（僅在 show_fundamental 開啟時，以縮排徽章列呈現）
+                            if show_fundamental:
+                                ticker = row["ticker"]
+                                fund = FUNDAMENTAL_RESULTS.get(ticker, {})
+                                fund_badges_list = []
+
+                                # 🧪 Code 33（僅符合時顯示）
+                                c33 = fund.get("c33", {})
+                                if c33.get("active", False):
+                                    c33_traj = c33.get("trajectory", "").replace('"', '&quot;').replace("\\n", "&#10;")
+                                    fund_badges_list.append(
+                                        f'<span style="background:#e6f7ff;color:#0050b3;border:1px solid #91d5ff;'
+                                        f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
+                                        f'margin-right:5px;cursor:help;" title="【Code 33】連3季 EPS/營收/淨利率同步加速&#10;{c33_traj}">🧪 Code 33</span>'
+                                    )
+
+                                # 🚀 月營收（僅達標時顯示）
+                                mrev = fund.get("mrev", {})
+                                mrev_12h = mrev.get("is_12m_high", False)
+                                mrev_acc = mrev.get("is_accelerating", False)
+                                mrev_traj = mrev.get("trajectory", "").replace('"', '&quot;').replace("\\n", "&#10;")
+                                if mrev_12h and mrev_acc:
+                                    fund_badges_list.append(
+                                        f'<span style="background:#f6ffed;color:#389e0d;border:1px solid #b7eb8f;'
+                                        f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
+                                        f'margin-right:5px;cursor:help;" title="【月營收新高 &amp; YoY加速】&#10;{mrev_traj}">🚀 月營收爆發</span>'
+                                    )
+                                elif mrev_12h:
+                                    fund_badges_list.append(
+                                        f'<span style="background:#f6ffed;color:#389e0d;border:1px solid #b7eb8f;'
+                                        f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
+                                        f'margin-right:5px;cursor:help;" title="【月營收創12M新高】&#10;{mrev_traj}">🚀 營收新高</span>'
+                                    )
+                                elif mrev_acc:
+                                    fund_badges_list.append(
+                                        f'<span style="background:#f6ffed;color:#389e0d;border:1px solid #b7eb8f;'
+                                        f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
+                                        f'margin-right:5px;cursor:help;" title="【YoY連續兩月加速】&#10;{mrev_traj}">🚀 營收YoY加速</span>'
+                                    )
+
+                                # 💥 盈餘意外（僅有分析師預估值且已公佈時顯示）
+                                surprise = fund.get("surprise")
+                                if surprise:
+                                    val = surprise["surprise"]
+                                    est = surprise["estimate"]
+                                    act = surprise["actual"]
+                                    dt = surprise["date"]
+                                    tip = f"預估 EPS: {est:.2f}&#10;實際 EPS: {act:.2f}&#10;公佈日期: {dt}"
+                                    if val > 0:
+                                        fund_badges_list.append(
+                                            f'<span style="background:#fff7e6;color:#d46b08;border:1px solid #ffd591;'
+                                            f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
+                                            f'margin-right:5px;cursor:help;" title="{tip}">💥 意外 +{val:.1f}%</span>'
+                                        )
+                                    else:
+                                        fund_badges_list.append(
+                                            f'<span style="background:#fff0f6;color:#c41d7f;border:1px solid #ffadd2;'
+                                            f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
+                                            f'margin-right:5px;cursor:help;" title="{tip}">💥 意外 {val:.1f}%</span>'
+                                        )
+
+                                # 若有任何徽章，以縮排子行呈現（用 └ 連接）
+                                if fund_badges_list:
+                                    badge_html = "".join(fund_badges_list)
+                                    lines.append(
+                                        f"  <div style='margin:-2px 0 6px 20px;line-height:2;opacity:0.95;'>"
+                                        f"<span style='color:#bbb;font-size:0.8em;margin-right:4px;'>└</span>"
+                                        f"{badge_html}</div>"
+                                    )
+
                         return "\n".join(lines)
 
                     c1, c2 = st.columns(2)
