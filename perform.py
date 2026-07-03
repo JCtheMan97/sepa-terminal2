@@ -1284,12 +1284,19 @@ if submit_btn or st.session_state.first_run:
                     desc_lines = []
                     if show_fundamental:
                         desc_lines.append("🧪 <b>Code 33</b> = 連3季 EPS/營收/淨利率三加速&nbsp;｜&nbsp;🚀 <b>月營收</b> = 創12M新高 或 YoY連2月加速")
+                        desc_lines.append(
+                            "🔬 <b>馬克的 SEPA 基本面心法備註</b>：<br>"
+                            "&nbsp;&nbsp;• <b>「技術面決定進場時機，基本面決定漲幅高度」</b>：馬克指出，90% 的超級飆股在發動主升段前，其盈餘與營收均呈現『加速增長』的特徵。<br>"
+                            "&nbsp;&nbsp;• <b>Code 33 三加速</b>：代表連續 3 季 EPS YoY、營收 YoY、淨利率同步攀升，是機構資金（Institutional Money）鎖定吃貨的最強護城河。<br>"
+                            "&nbsp;&nbsp;• <b>月營收爆發</b>：在季報公佈前，單月營收創 12 個月新高或 YoY 連續加速，是領先確認終端銷售動能爆發的即時信號。"
+                        )
                         
                     if desc_lines:
                         st.markdown(
-                            "<span style='color:#555;font-size:0.84em;'>"
-                            "💡 <b>指標徽章說明</b>（懸停可檢視詳細數據）：<br>&nbsp;&nbsp;" + "<br>&nbsp;&nbsp;".join(desc_lines) +
-                            "</span>",
+                            "<div style='background-color:#f6ffed; border:1px solid #b7eb8f; padding:12px; border-radius:8px; margin-bottom:15px;'>"
+                            "<span style='color:#389e0d; font-size:0.86em; line-height:1.6;'>"
+                            "💡 <b>指標徽章說明與馬克心法備註</b>（懸停可檢視詳細數據軌跡）：<br><br>" + "<br><br>".join(desc_lines) +
+                            "</span></div>",
                             unsafe_allow_html=True
                         )
                     else:
