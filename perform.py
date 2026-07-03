@@ -9,6 +9,7 @@ import requests
 from io import StringIO
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
+from bs4 import BeautifulSoup
 
 # 1. 網頁初始設定
 st.set_page_config(page_title="🏆 SEPA 雙軌強勢股終端機", layout="wide")
@@ -205,10 +206,11 @@ def fetch_disposition_data():
 
 _FINMIND_FINANCIALS_CACHE = {}
 def fetch_finmind_financials(stock_id):
-    """獲取 FinMind 季度損益表數據 (僅在有資料時快取，避免失敗永久鎖死)"""
+    """獲取季度損益表數據 (首選 FinMind，失敗則自動以 yfinance 作為免費備援)"""
     if stock_id in _FINMIND_FINANCIALS_CACHE:
         return _FINMIND_FINANCIALS_CACHE[stock_id]
         
+    # 1. 嘗試 FinMind API
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
         "dataset": "TaiwanStockFinancialStatements",
@@ -216,7 +218,7 @@ def fetch_finmind_financials(stock_id):
         "start_date": "2024-01-01"
     }
     try:
-        r = requests.get(url, params=params, timeout=10)
+        r = requests.get(url, params=params, timeout=8)
         if r.status_code == 200:
             data = r.json().get("data", [])
             if data:
@@ -224,6 +226,42 @@ def fetch_finmind_financials(stock_id):
                 return data
     except Exception:
         pass
+        
+    # 2. 備援機制：使用 yfinance 獲取季度財報數據 (免費且免 Token)
+    for suffix in [".TW", ".TWO"]:
+        try:
+            ticker = f"{stock_id}{suffix}"
+            tick = yf.Ticker(ticker)
+            qf = tick.quarterly_financials
+            if qf is not None and not qf.empty:
+                # 建立符合 process_code33 格式的財務字典清單
+                records = []
+                # 智能對齊會計科目名稱
+                rev_row = "Total Revenue" if "Total Revenue" in qf.index else ("Operating Revenue" if "Operating Revenue" in qf.index else None)
+                net_row = "Net Income" if "Net Income" in qf.index else ("Net Income Including Noncontrolling Interests" if "Net Income Including Noncontrolling Interests" in qf.index else None)
+                eps_row = "Basic EPS" if "Basic EPS" in qf.index else ("Diluted EPS" if "Diluted EPS" in qf.index else None)
+                
+                for col_date in qf.columns:
+                    date_str = col_date.strftime('%Y-%m-%d')
+                    if rev_row:
+                        val = qf.loc[rev_row, col_date]
+                        if pd.notna(val):
+                            records.append({'date': date_str, 'stock_id': stock_id, 'type': 'Revenue', 'value': float(val)})
+                    if net_row:
+                        val = qf.loc[net_row, col_date]
+                        if pd.notna(val):
+                            records.append({'date': date_str, 'stock_id': stock_id, 'type': 'IncomeAfterTaxes', 'value': float(val)})
+                    if eps_row:
+                        val = qf.loc[eps_row, col_date]
+                        if pd.notna(val):
+                            records.append({'date': date_str, 'stock_id': stock_id, 'type': 'EPS', 'value': float(val)})
+                
+                if records:
+                    _FINMIND_FINANCIALS_CACHE[stock_id] = records
+                    return records
+        except Exception:
+            pass
+            
     return []
 
 _FINMIND_REVENUE_CACHE = {}
@@ -239,7 +277,7 @@ def fetch_finmind_monthly_revenue(stock_id):
         "start_date": "2024-01-01"
     }
     try:
-        r = requests.get(url, params=params, timeout=10)
+        r = requests.get(url, params=params, timeout=8)
         if r.status_code == 200:
             data = r.json().get("data", [])
             if data:
@@ -249,166 +287,6 @@ def fetch_finmind_monthly_revenue(stock_id):
         pass
     return []
 
-_FINMIND_INSTITUTIONAL_CACHE = {}
-def fetch_finmind_institutional(stock_id, start_date_str, end_date_str):
-    """獲取 FinMind 三大法人買賣超數據 (僅在有資料時快取)"""
-    key = (stock_id, start_date_str, end_date_str)
-    if key in _FINMIND_INSTITUTIONAL_CACHE:
-        return _FINMIND_INSTITUTIONAL_CACHE[key]
-        
-    url = "https://api.finmindtrade.com/api/v4/data"
-    params = {
-        "dataset": "TaiwanStockInstitutionalInvestorsBuySell",
-        "data_id": stock_id,
-        "start_date": start_date_str,
-        "end_date": end_date_str
-    }
-    try:
-        r = requests.get(url, params=params, timeout=10)
-        if r.status_code == 200:
-            data = r.json().get("data", [])
-            if data:
-                _FINMIND_INSTITUTIONAL_CACHE[key] = data
-                return data
-    except Exception:
-        pass
-    return []
-
-_TDCC_CACHE = {}
-def fetch_tdcc_holding_shares_cached(stock_id, target_date_str):
-    """獲取集保結算所個股股權分散表並計算變動 (僅在有資料時快取)"""
-    key = (stock_id, target_date_str)
-    if key in _TDCC_CACHE:
-        return _TDCC_CACHE[key]
-        
-    target_date_clean = target_date_str.replace("-", "")
-    url = "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock"
-    }
-    
-    session = requests.Session()
-    try:
-        # GET 1 to get token
-        import urllib3
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        
-        r_get1 = session.get(url, headers=headers, verify=False, timeout=8)
-        if r_get1.status_code != 200:
-            return None
-        soup_get1 = BeautifulSoup(r_get1.text, 'html.parser')
-        token_tag1 = soup_get1.find('input', {'name': 'SYNCHRONIZER_TOKEN'})
-        if not token_tag1:
-            return None
-        token1 = token_tag1.get('value')
-        
-        select_tag = soup_get1.find('select', {'name': 'scaDate'})
-        if not select_tag:
-            return None
-        dates = [opt.get('value') for opt in select_tag.find_all('option')]
-        
-        # Filter dates
-        dates_filtered = [d for d in dates if d <= target_date_clean]
-        if len(dates_filtered) < 2:
-            return None
-            
-        date_t0 = dates_filtered[0]
-        date_t1 = dates_filtered[1]
-        
-        # POST 1
-        payload_t0 = {
-            "SYNCHRONIZER_TOKEN": token1,
-            "SYNCHRONIZER_URI": "/portal/zh/smWeb/qryStock",
-            "method": "submit",
-            "sqlMethod": "StockNo",
-            "stockNo": stock_id,
-            "scaDate": date_t0
-        }
-        r_t0 = session.post(url, data=payload_t0, headers=headers, verify=False, timeout=8)
-        
-        # GET 2
-        r_get2 = session.get(url, headers=headers, verify=False, timeout=8)
-        soup_get2 = BeautifulSoup(r_get2.text, 'html.parser')
-        token_tag2 = soup_get2.find('input', {'name': 'SYNCHRONIZER_TOKEN'})
-        token2 = token_tag2.get('value') if token_tag2 else token1
-        
-        # POST 2
-        payload_t1 = {
-            "SYNCHRONIZER_TOKEN": token2,
-            "SYNCHRONIZER_URI": "/portal/zh/smWeb/qryStock",
-            "method": "submit",
-            "sqlMethod": "StockNo",
-            "stockNo": stock_id,
-            "scaDate": date_t1
-        }
-        r_t1 = session.post(url, data=payload_t1, headers=headers, verify=False, timeout=8)
-        
-        def parse_dist(html):
-            soup = BeautifulSoup(html, 'html.parser')
-            tables = soup.find_all('table')
-            if len(tables) < 2:
-                return None
-            rows = tables[1].find_all('tr')
-            dist = {}
-            for row in rows[1:]:
-                cols = [col.text.strip() for col in row.find_all(['td', 'th'])]
-                if len(cols) >= 5:
-                    try:
-                        dist[cols[0]] = float(cols[4].replace('%', '').replace(',', ''))
-                    except:
-                        pass
-            return dist
-            
-        dist_t0 = parse_dist(r_t0.text)
-        dist_t1 = parse_dist(r_t1.text)
-        if not dist_t0 or not dist_t1:
-            return None
-            
-        # Retail (<100張) = levels 1 to 9
-        retail_t0 = sum(dist_t0.get(str(i), 0.0) for i in range(1, 10))
-        retail_t1 = sum(dist_t1.get(str(i), 0.0) for i in range(1, 10))
-        
-        # Big 400 (>400張) = levels 12 to 15
-        big_400_t0 = sum(dist_t0.get(str(i), 0.0) for i in range(12, 16))
-        big_400_t1 = sum(dist_t1.get(str(i), 0.0) for i in range(12, 16))
-        
-        # Big 1000 (>1000張) = level 15
-        big_1000_t0 = dist_t0.get("15", 0.0)
-        big_1000_t1 = dist_t1.get("15", 0.0)
-        
-        result = {
-            "date_t0": date_t0,
-            "date_t1": date_t1,
-            "retail_t0": retail_t0,
-            "retail_change": retail_t0 - retail_t1,
-            "big_400_t0": big_400_t0,
-            "big_400_change": big_400_t0 - big_400_t1,
-            "big_1000_t0": big_1000_t0,
-            "big_1000_change": big_1000_t0 - big_1000_t1
-        }
-        _TDCC_CACHE[key] = result
-        return result
-    except:
-        pass
-    return None
-
-
-_YFINANCE_SURPRISE_CACHE = {}
-def fetch_yfinance_surprise(ticker):
-    """獲取 yfinance 盈餘意外與分析師預估數據 (僅在有資料時快取)"""
-    if ticker in _YFINANCE_SURPRISE_CACHE:
-        return _YFINANCE_SURPRISE_CACHE[ticker]
-    try:
-        tick = yf.Ticker(ticker)
-        ed = tick.get_earnings_dates(limit=8)
-        if ed is not None and not ed.empty:
-            res_json = ed.to_json(date_format='iso')
-            _YFINANCE_SURPRISE_CACHE[ticker] = res_json
-            return res_json
-    except Exception:
-        pass
-    return None
 
 # --- 🧪 基本面運算核心邏輯 (支持歷史回溯時間軸過濾) ---
 
@@ -433,6 +311,17 @@ def process_code33(financials, backtest_date_str):
         
     df_pivot = df.pivot(index="date", columns="type", values="value")
     df_pivot = df_pivot.sort_index()
+    
+    # 智慧插補：若 EPS 缺失但淨利存在，以常規股本比例換算 EPS，確保軌跡計算不中斷
+    if "EPS" in df_pivot.columns and "IncomeAfterTaxes" in df_pivot.columns:
+        both = df_pivot.dropna(subset=["EPS", "IncomeAfterTaxes"])
+        if not both.empty:
+            factor = both["EPS"].iloc[0] / both["IncomeAfterTaxes"].iloc[0]
+            df_pivot["EPS"] = df_pivot["EPS"].fillna(df_pivot["IncomeAfterTaxes"] * factor)
+        else:
+            df_pivot["EPS"] = df_pivot["EPS"].fillna(df_pivot["IncomeAfterTaxes"])
+    elif "IncomeAfterTaxes" in df_pivot.columns:
+        df_pivot["EPS"] = df_pivot["IncomeAfterTaxes"]
     
     eps_yoy = []
     rev_yoy = []
@@ -471,7 +360,40 @@ def process_code33(financials, backtest_date_str):
     df_pivot["NetMargin"] = net_margin
     
     valid_df = df_pivot.dropna(subset=["EPS_YoY", "Revenue_YoY", "NetMargin"])
+    
+    # 彈性多級降級判定：當歷史資料不足3季時，自動採用2季或1季 YoY 作為參考
     if len(valid_df) < 3:
+        if len(valid_df) == 2:
+            eps_acc = valid_df["EPS_YoY"].iloc[-1] > valid_df["EPS_YoY"].iloc[-2]
+            rev_acc = valid_df["Revenue_YoY"].iloc[-1] > valid_df["Revenue_YoY"].iloc[-2]
+            margin_acc = valid_df["NetMargin"].iloc[-1] > valid_df["NetMargin"].iloc[-2]
+            active = eps_acc and rev_acc and margin_acc
+            eps_t2 = valid_df["EPS_YoY"].iloc[-2:].tolist()
+            rev_t2 = valid_df["Revenue_YoY"].iloc[-2:].tolist()
+            margin_t2 = valid_df["NetMargin"].iloc[-2:].tolist()
+            
+            trajectory = (
+                f"[降級比對] EPS YoY: {eps_t2[0]:.1f}% → {eps_t2[1]:.1f}%\\n"
+                f"營收 YoY: {rev_t2[0]:.1f}% → {rev_t2[1]:.1f}%\\n"
+                f"淨利率: {margin_t2[0]:.1f}% → {margin_t2[1]:.1f}%"
+            )
+            display_text = f"✅ (EPS: {eps_t2[1]:.1f}%)" if active else f"❌ (EPS: {eps_t2[1]:.1f}%)"
+            return {"active": active, "trajectory": trajectory, "display": display_text}
+            
+        elif len(valid_df) == 1:
+            eps_val = valid_df["EPS_YoY"].iloc[-1]
+            rev_val = valid_df["Revenue_YoY"].iloc[-1]
+            margin_val = valid_df["NetMargin"].iloc[-1]
+            # 單季 YoY 皆為正，且淨利率大於 30% 視為基本面優秀
+            active = eps_val > 0 and rev_val > 0 and margin_val > 30
+            trajectory = (
+                f"[降級單季] EPS YoY: {eps_val:.1f}%\\n"
+                f"營收 YoY: {rev_val:.1f}%\\n"
+                f"淨利率: {margin_val:.1f}%"
+            )
+            display_text = f"✅ (EPS: {eps_val:.1f}%)" if active else f"❌ (EPS: {eps_val:.1f}%)"
+            return {"active": active, "trajectory": trajectory, "display": display_text}
+            
         return {"active": False, "trajectory": "歷史季數不足 (計算 YoY 需比對去年)", "display": "不足3季數據"}
         
     # 連續三季加速檢測
@@ -654,44 +576,33 @@ def process_chip_flow(inst_raw, backtest_date_str):
         pass
     return default_res
 
-# --- 🚀 多線程併發加載基本面與籌碼數據 ---
+# --- 🚀 多線程併發加載基本面數據 ---
 
 def get_single_stock_fundamentals(args):
     ticker, backtest_date = args
     stock_id = ticker.split('.')[0]
     backtest_date_str = backtest_date.strftime('%Y-%m-%d')
     
-    # 觀察 30 天以取得 5 個交易日的三大法人買賣超資料
-    inst_start_date_str = (backtest_date - timedelta(days=30)).strftime('%Y-%m-%d')
-    
-    # 1. 抓取數據 (使用 Cache)
+    # 1. 抓取數據 (使用 Cache / Fallback)
     financials = fetch_finmind_financials(stock_id)
     monthly_rev = fetch_finmind_monthly_revenue(stock_id)
-    surprise_json = fetch_yfinance_surprise(ticker)
-    inst_raw = fetch_finmind_institutional(stock_id, inst_start_date_str, backtest_date_str)
-    tdcc_raw = fetch_tdcc_holding_shares_cached(stock_id, backtest_date_str)
     
-    # 2. 計算基本面與籌碼指標
+    # 2. 計算基本面指標
     c33 = process_code33(financials, backtest_date_str)
     mrev = process_monthly_momentum(monthly_rev, backtest_date_str)
-    surprise = process_earnings_surprise(surprise_json, backtest_date)
-    chip = process_chip_flow(inst_raw, backtest_date_str)
     
-    return ticker, c33, mrev, surprise, chip, tdcc_raw
+    return ticker, c33, mrev
 
 def fetch_all_fundamentals(tickers, backtest_date):
-    """併發加載所有股票的基本面與籌碼資料"""
+    """併發加載所有股票的基本面資料"""
     results = {}
     args_list = [(ticker, backtest_date) for ticker in tickers]
     with ThreadPoolExecutor(max_workers=20) as executor:
         futures_results = list(executor.map(get_single_stock_fundamentals, args_list))
-    for ticker, c33, mrev, surprise, chip, tdcc in futures_results:
+    for ticker, c33, mrev in futures_results:
         results[ticker] = {
             "c33": c33,
-            "mrev": mrev,
-            "surprise": surprise,
-            "chip": chip,
-            "tdcc": tdcc
+            "mrev": mrev
         }
     return results
 
@@ -740,8 +651,7 @@ with st.sidebar.form("sepa_integrated_form"):
     holding_days = st.number_input("回溯後預計持有天數 (交易日)", min_value=1, max_value=120, value=20, step=1)
     
     is_backtesting = backtest_date < datetime.today().date()
-    show_fundamental = st.checkbox("🔬 顯示基本面分析標籤", value=False, help="開啟後，下方象限列表個股名稱下方將顯示 Code 33、月營收與盈餘意外之詳細徽章")
-    show_chip = st.checkbox("🐳 顯示法人與集保籌碼標籤", value=False, help="開啟後，下方象限列表個股名稱下方將顯示外資/投信近5日買賣超與集保大戶/散戶增減變動")
+    show_fundamental = st.checkbox("🔬 顯示基本面分析標籤", value=False, help="開啟後，下方象限列表個股名稱下方將顯示 Code 33 與 月營收之詳細徽章")
     submit_btn = st.form_submit_button("🚀 執行雙軌交叉選股分析")
 
 # --- 🔌 API 連線與資料時間診斷 ---
@@ -767,6 +677,8 @@ with st.sidebar.expander("🔌 數據引擎與資料時間診斷", expanded=True
                     diag_info["FinMind (月營收)"] = f"🟢 正常 (最新: {data[-1]['revenue_year']}/{data[-1]['revenue_month']})"
                 else:
                     diag_info["FinMind (月營收)"] = "🟡 無回傳資料"
+            elif r.status_code == 402:
+                diag_info["FinMind (月營收)"] = "🔴 額度超限/付費限制 (HTTP 402)"
             else:
                 diag_info["FinMind (月營收)"] = f"🔴 錯誤 (HTTP {r.status_code})"
         except Exception as e:
@@ -798,16 +710,16 @@ with st.sidebar.expander("🔌 數據引擎與資料時間診斷", expanded=True
         except Exception as e:
             diag_info["台灣集保所"] = f"🔴 連線失敗: {type(e).__name__}"
             
-        # 3. yfinance
+        # 3. yfinance (改用歷史價格測試，避開有依賴問題的 get_earnings_dates)
         try:
             tick = yf.Ticker("2330.TW")
-            ed = tick.get_earnings_dates(limit=1)
-            if ed is not None and not ed.empty:
-                diag_info["yfinance (盈餘)"] = f"🟢 正常 (最新: {ed.index[0].strftime('%Y-%m-%d')})"
+            h = tick.history(period="1d")
+            if not h.empty:
+                diag_info["yfinance (價格)"] = f"🟢 正常 (最新交易日: {h.index[-1].strftime('%Y-%m-%d')})"
             else:
-                diag_info["yfinance (盈餘)"] = "🟡 無預估資料"
+                diag_info["yfinance (價格)"] = "🟡 無交易數據"
         except Exception as e:
-            diag_info["yfinance (盈餘)"] = f"🔴 連線失敗: {type(e).__name__}"
+            diag_info["yfinance (價格)"] = f"🔴 連線失敗: {type(e).__name__}"
             
         return diag_info
         
@@ -1051,42 +963,10 @@ if submit_btn or st.session_state.first_run:
 
                         perf_col_key = f"後續{holding_days}日實際報酬(%)"
                         
-                        # 讀取基本面與籌碼計算數據
+                        # 讀取基本面計算數據
                         fund_data = FUNDAMENTAL_RESULTS.get(ticker, {})
                         c33_display = fund_data.get("c33", {}).get("display", "N/A")
                         mrev_display = fund_data.get("mrev", {}).get("display", "N/A")
-                        surprise_data = fund_data.get("surprise")
-                        if surprise_data:
-                            surp_val = surprise_data["surprise"]
-                            surprise_display = f"+{surp_val:.1f}%" if surp_val > 0 else f"{surp_val:.1f}%"
-                        else:
-                            surprise_display = "—"
-                            
-                        # 讀取籌碼數據
-                        chip_data = fund_data.get("chip", {"foreign_5d": 0.0, "trust_5d": 0.0, "dealer_5d": 0.0, "total_5d": 0.0})
-                        foreign_5d = chip_data.get("foreign_5d", 0.0)
-                        trust_5d = chip_data.get("trust_5d", 0.0)
-                        
-                        # 讀取集保週數據
-                        tdcc_data = fund_data.get("tdcc")
-                        if tdcc_data:
-                            big_1000_chg = tdcc_data.get("big_1000_change")
-                            big_400_chg = tdcc_data.get("big_400_change")
-                            retail_chg = tdcc_data.get("retail_change")
-                            
-                            big_desc = ""
-                            if big_1000_chg is not None and abs(big_1000_chg) > 0.001:
-                                big_desc = f"大戶1000:{'增' if big_1000_chg > 0 else '減'}({big_1000_chg:+.2f}%)"
-                            elif big_400_chg is not None and abs(big_400_chg) > 0.001:
-                                big_desc = f"大戶400:{'增' if big_400_chg > 0 else '減'}({big_400_chg:+.2f}%)"
-                                
-                            retail_desc = ""
-                            if retail_chg is not None and abs(retail_chg) > 0.001:
-                                retail_desc = f"散戶:{'增' if retail_chg > 0 else '減'}({retail_chg:+.2f}%)"
-                                
-                            tdcc_display = f"{big_desc} | {retail_desc}" if (big_desc and retail_desc) else (big_desc or retail_desc or "無變動")
-                        else:
-                            tdcc_display = "—"
 
                         integrated_results.append({
                             "ticker": ticker, # 隱藏欄位
@@ -1097,10 +977,6 @@ if submit_btn or st.session_state.first_run:
                             "動能狀態判定": vcp_status_final,
                             "🧪 Code 33": c33_display,
                             "🚀 月營收爆發": mrev_display,
-                            "💥 盈餘意外": surprise_display,
-                            "外資5日超(張)": foreign_5d,
-                            "投信5日超(張)": trust_5d,
-                            "集保周變動": tdcc_display,
                             "50MA乖離率(%)": bias_50,
                             "IBD式 絕對分數": ibd, "對比 0050 超額強度": ibd - benchmark_ibd_score,
                             "短線抗跌韌性分數": resilience, "逆風勝率": f"{outperform} / {total_panic_days} 天",
@@ -1113,15 +989,12 @@ if submit_btn or st.session_state.first_run:
                     cols = df_final.columns.tolist()
                     perf_col_name = f"後續{holding_days}日實際報酬(%)"
                     
-                    fundamental_cols = ["🧪 Code 33", "🚀 月營收爆發", "💥 盈餘意外"]
-                    chip_cols = ["外資5日超(張)", "投信5日超(張)", "集保周變動"]
+                    fundamental_cols = ["🧪 Code 33", "🚀 月營收爆發"]
                     
-                    for f_col in fundamental_cols + chip_cols:
+                    for f_col in fundamental_cols:
                         if f_col in cols:
                             cols.remove(f_col)
                     idx_to_insert = cols.index("股票名稱") + 1
-                    for c_col in reversed(chip_cols):
-                        cols.insert(idx_to_insert, c_col)
                     for f_col in reversed(fundamental_cols):
                         cols.insert(idx_to_insert, f_col)
                         
@@ -1131,8 +1004,8 @@ if submit_btn or st.session_state.first_run:
                     if perf_col_name in cols:
                         cols.remove(perf_col_name)
                         if is_backtesting:
-                            # 插入在籌碼欄位後面
-                            cols.insert(cols.index("股票名稱") + 1 + len(fundamental_cols) + len(chip_cols), perf_col_name)
+                            # 插入在基本面欄位後面
+                            cols.insert(cols.index("股票名稱") + 1 + len(fundamental_cols), perf_col_name)
                         else:
                             cols.append(perf_col_name)
                     df_final = df_final[cols]
@@ -1176,11 +1049,7 @@ if submit_btn or st.session_state.first_run:
                         "IBD式 絕對分數": st.column_config.NumberColumn("IBD式 絕對強度", format="%.1f"),
                         "短線抗跌韌性分數": st.column_config.ProgressColumn("抗跌得分", min_value=0, max_value=100, format="%.0f分"),
                         "🧪 Code 33": st.column_config.TextColumn("🧪 Code 33", help="連續三季的 EPS YoY、營收 YoY、淨利率是否同步呈現遞增趨勢。✅=三加速確認"),
-                        "🚀 月營收爆發": st.column_config.TextColumn("🚀 月營收爆發", help="月營收創12M新高 或 YoY連2月加速"),
-                        "💥 盈餘意外": st.column_config.TextColumn("💥 盈餘意外", help="有分析師預估值且已公佈實際EPS時顯示。— 表示無預估值"),
-                        "外資5日超(張)": st.column_config.NumberColumn("外資5日買超(張)", format="%+d"),
-                        "投信5日超(張)": st.column_config.NumberColumn("投信5日買超(張)", format="%+d"),
-                        "集保周變動": st.column_config.TextColumn("集保周變動 (大戶/散戶)", help="集保大戶持股比周增減與100張以下散戶持股比周增減之幅度(%)")
+                        "🚀 月營收爆發": st.column_config.TextColumn("🚀 月營收爆發", help="月營收創12M新高 或 YoY連2月加速")
                     }
                     if is_backtesting:
                         column_config_dict[perf_col_name] = st.column_config.NumberColumn(f"🎯 後續{holding_days}日報酬", format="%.2f%%")
@@ -1196,9 +1065,7 @@ if submit_btn or st.session_state.first_run:
                     # 說明文字：依開關狀態而異
                     desc_lines = []
                     if show_fundamental:
-                        desc_lines.append("🧪 <b>Code 33</b> = 連3季 EPS/營收/淨利率三加速&nbsp;｜&nbsp;🚀 <b>月營收</b> = 創12M新高 或 YoY連2月加速&nbsp;｜&nbsp;💥 <b>盈餘意外</b> = 實際優於/遜於預估（無預估值不顯示）")
-                    if show_chip:
-                        desc_lines.append("🐳 <b>外資5D / 投信5D</b> = 累計買賣超張數（投信在台股中小型動能股極具參考價值）<br>&nbsp;&nbsp;👥 <b>集保大戶/散戶</b> = 周大戶(1000或400張以上)持股比增減、散戶(100張以下)持股比增減（籌碼集中度關鍵）")
+                        desc_lines.append("🧪 <b>Code 33</b> = 連3季 EPS/營收/淨利率三加速&nbsp;｜&nbsp;🚀 <b>月營收</b> = 創12M新高 或 YoY連2月加速")
                         
                     if desc_lines:
                         st.markdown(
@@ -1208,7 +1075,7 @@ if submit_btn or st.session_state.first_run:
                             unsafe_allow_html=True
                         )
                     else:
-                        st.caption(f"💡 括號內為 50MA 乖離率(%)。右側標註為【後續 {holding_days} 日回測實際報酬率】。可在左側開啟「🔬 顯示基本面分析標籤」與「🐳 顯示法人與集保籌碼標籤」查看更多維度資訊。")
+                        st.caption(f"💡 括號內為 50MA 乖離率(%)。右側標註為【後續 {holding_days} 日回測實際報酬率】。可在左側開啟「🔬 顯示基本面分析標籤」查看更多維度資訊。")
                     
                     with st.spinner("🚨 正在同步證交所/櫃買中心處置股公告..."):
                         DISPOSITION_MAP = fetch_disposition_data()
@@ -1302,109 +1169,6 @@ if submit_btn or st.session_state.first_run:
                                         f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
                                         f'margin-right:5px;cursor:help;" title="【YoY連續兩月加速】&#10;{mrev_traj}">🚀 營收YoY加速</span>'
                                     )
-
-                                # 💥 盈餘意外
-                                surprise = fund.get("surprise")
-                                if surprise:
-                                    val = surprise["surprise"]
-                                    est = surprise["estimate"]
-                                    act = surprise["actual"]
-                                    dt = surprise["date"]
-                                    tip = f"預估 EPS: {est:.2f}&#10;實際 EPS: {act:.2f}&#10;公佈日期: {dt}"
-                                    if val > 0:
-                                        sub_badges_list.append(
-                                            f'<span style="background:#fff7e6;color:#d46b08;border:1px solid #ffd591;'
-                                            f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
-                                            f'margin-right:5px;cursor:help;" title="{tip}">💥 意外 +{val:.1f}%</span>'
-                                        )
-                                    else:
-                                        sub_badges_list.append(
-                                            f'<span style="background:#fff0f6;color:#c41d7f;border:1px solid #ffadd2;'
-                                            f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
-                                            f'margin-right:5px;cursor:help;" title="{tip}">💥 意外 {val:.1f}%</span>'
-                                        )
-
-                            if show_chip:
-                                chip = fund.get("chip", {"foreign_5d": 0.0, "trust_5d": 0.0, "dealer_5d": 0.0, "total_5d": 0.0})
-                                f_val = chip.get("foreign_5d", 0.0)
-                                t_val = chip.get("trust_5d", 0.0)
-
-                                if f_val > 0:
-                                    sub_badges_list.append(
-                                        f'<span style="background:#eaf6ff;color:#0076cc;border:1px solid #91d5ff;'
-                                        f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
-                                        f'margin-right:5px;cursor:help;" title="外資近5日累計買超 {f_val:.1f} 張">🐳 外資5D +{f_val:.0f}張</span>'
-                                    )
-                                elif f_val < 0:
-                                    sub_badges_list.append(
-                                        f'<span style="background:#fff1f0;color:#cf1322;border:1px solid #ffa39e;'
-                                        f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
-                                        f'margin-right:5px;cursor:help;" title="外資近5日累計賣超 {abs(f_val):.1f} 張">🐳 外資5D {f_val:.0f}張</span>'
-                                    )
-
-                                if t_val > 0:
-                                    sub_badges_list.append(
-                                        f'<span style="background:#f6ffed;color:#389e0d;border:1px solid #b7eb8f;'
-                                        f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
-                                        f'margin-right:5px;cursor:help;" title="投信近5日累計買超 {t_val:.1f} 張">🎯 投信5D +{t_val:.0f}張</span>'
-                                    )
-                                elif t_val < 0:
-                                    sub_badges_list.append(
-                                        f'<span style="background:#fff1f0;color:#cf1322;border:1px solid #ffa39e;'
-                                        f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
-                                        f'margin-right:5px;cursor:help;" title="投信近5日累計賣超 {abs(t_val):.1f} 張">🎯 投信5D {t_val:.0f}張</span>'
-                                    )
-
-                                # TDCC 集保大戶/散戶週變動
-                                tdcc = fund.get("tdcc")
-                                if tdcc:
-                                    big_1000_c = tdcc.get("big_1000_change", 0.0)
-                                    big_400_c = tdcc.get("big_400_change", 0.0)
-                                    ret_c = tdcc.get("retail_change", 0.0)
-
-                                    if abs(big_1000_c) > 0.001:
-                                        big_title = f"集保 1000張 大戶持股周變動: {big_1000_c:+.2f}%"
-                                        if big_1000_c > 0:
-                                            sub_badges_list.append(
-                                                f'<span style="background:#f6ffed;color:#389e0d;border:1px solid #b7eb8f;'
-                                                f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
-                                                f'margin-right:5px;cursor:help;" title="{big_title}">👥 大戶增</span>'
-                                            )
-                                        else:
-                                            sub_badges_list.append(
-                                                f'<span style="background:#fff1f0;color:#cf1322;border:1px solid #ffa39e;'
-                                                f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
-                                                f'margin-right:5px;cursor:help;" title="{big_title}">👥 大戶減</span>'
-                                            )
-                                    elif abs(big_400_c) > 0.001:
-                                        big_title = f"集保 400張 大戶持股周變動: {big_400_c:+.2f}%"
-                                        if big_400_c > 0:
-                                            sub_badges_list.append(
-                                                f'<span style="background:#f6ffed;color:#389e0d;border:1px solid #b7eb8f;'
-                                                f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
-                                                f'margin-right:5px;cursor:help;" title="{big_title}">👥 大戶(400)增</span>'
-                                            )
-                                        else:
-                                            sub_badges_list.append(
-                                                f'<span style="background:#fff1f0;color:#cf1322;border:1px solid #ffa39e;'
-                                                f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
-                                                f'margin-right:5px;cursor:help;" title="{big_title}">👥 大戶(400)減</span>'
-                                            )
-
-                                    if abs(ret_c) > 0.001:
-                                        ret_title = f"集保 100張以下 散戶持股周變動: {ret_c:+.2f}%"
-                                        if ret_c < 0:
-                                            sub_badges_list.append(
-                                                f'<span style="background:#f6ffed;color:#389e0d;border:1px solid #b7eb8f;'
-                                                f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
-                                                f'margin-right:5px;cursor:help;" title="{ret_title}">👥 散戶減</span>'
-                                            )
-                                        else:
-                                            sub_badges_list.append(
-                                                f'<span style="background:#fff1f0;color:#cf1322;border:1px solid #ffa39e;'
-                                                f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
-                                                f'margin-right:5px;cursor:help;" title="{ret_title}">👥 散戶增</span>'
-                                            )
 
                             # 統一繪製縮排子行
                             if sub_badges_list:
