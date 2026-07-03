@@ -255,6 +255,121 @@ def fetch_finmind_institutional(stock_id, start_date_str, end_date_str):
         pass
     return []
 
+@st.cache_data(ttl=86400) # 集保資料每週更新，快取24小時
+def fetch_tdcc_holding_shares_cached(stock_id, target_date_str):
+    """獲取集保結算所個股股權分散表並計算變動"""
+    target_date_clean = target_date_str.replace("-", "")
+    url = "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock"
+    }
+    
+    session = requests.Session()
+    try:
+        # GET 1 to get token
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        
+        r_get1 = session.get(url, headers=headers, verify=False, timeout=8)
+        if r_get1.status_code != 200:
+            return None
+        soup_get1 = BeautifulSoup(r_get1.text, 'html.parser')
+        token_tag1 = soup_get1.find('input', {'name': 'SYNCHRONIZER_TOKEN'})
+        if not token_tag1:
+            return None
+        token1 = token_tag1.get('value')
+        
+        select_tag = soup_get1.find('select', {'name': 'scaDate'})
+        if not select_tag:
+            return None
+        dates = [opt.get('value') for opt in select_tag.find_all('option')]
+        
+        # Filter dates
+        dates_filtered = [d for d in dates if d <= target_date_clean]
+        if len(dates_filtered) < 2:
+            return None
+            
+        date_t0 = dates_filtered[0]
+        date_t1 = dates_filtered[1]
+        
+        # POST 1
+        payload_t0 = {
+            "SYNCHRONIZER_TOKEN": token1,
+            "SYNCHRONIZER_URI": "/portal/zh/smWeb/qryStock",
+            "method": "submit",
+            "sqlMethod": "StockNo",
+            "stockNo": stock_id,
+            "scaDate": date_t0
+        }
+        r_t0 = session.post(url, data=payload_t0, headers=headers, verify=False, timeout=8)
+        
+        # GET 2
+        r_get2 = session.get(url, headers=headers, verify=False, timeout=8)
+        soup_get2 = BeautifulSoup(r_get2.text, 'html.parser')
+        token_tag2 = soup_get2.find('input', {'name': 'SYNCHRONIZER_TOKEN'})
+        token2 = token_tag2.get('value') if token_tag2 else token1
+        
+        # POST 2
+        payload_t1 = {
+            "SYNCHRONIZER_TOKEN": token2,
+            "SYNCHRONIZER_URI": "/portal/zh/smWeb/qryStock",
+            "method": "submit",
+            "sqlMethod": "StockNo",
+            "stockNo": stock_id,
+            "scaDate": date_t1
+        }
+        r_t1 = session.post(url, data=payload_t1, headers=headers, verify=False, timeout=8)
+        
+        def parse_dist(html):
+            soup = BeautifulSoup(html, 'html.parser')
+            tables = soup.find_all('table')
+            if len(tables) < 2:
+                return None
+            rows = tables[1].find_all('tr')
+            dist = {}
+            for row in rows[1:]:
+                cols = [col.text.strip() for col in row.find_all(['td', 'th'])]
+                if len(cols) >= 5:
+                    try:
+                        dist[cols[0]] = float(cols[4].replace('%', '').replace(',', ''))
+                    except:
+                        pass
+            return dist
+            
+        dist_t0 = parse_dist(r_t0.text)
+        dist_t1 = parse_dist(r_t1.text)
+        if not dist_t0 or not dist_t1:
+            return None
+            
+        # Retail (<100張) = levels 1 to 9
+        retail_t0 = sum(dist_t0.get(str(i), 0.0) for i in range(1, 10))
+        retail_t1 = sum(dist_t1.get(str(i), 0.0) for i in range(1, 10))
+        
+        # Big 400 (>400張) = levels 12 to 15
+        big_400_t0 = sum(dist_t0.get(str(i), 0.0) for i in range(12, 16))
+        big_400_t1 = sum(dist_t1.get(str(i), 0.0) for i in range(12, 16))
+        
+        # Big 1000 (>1000張) = level 15
+        big_1000_t0 = dist_t0.get("15", 0.0)
+        big_1000_t1 = dist_t1.get("15", 0.0)
+        
+        return {
+            "date_t0": date_t0,
+            "date_t1": date_t1,
+            "retail_t0": retail_t0,
+            "retail_change": retail_t0 - retail_t1,
+            "big_400_t0": big_400_t0,
+            "big_400_change": big_400_t0 - big_400_t1,
+            "big_1000_t0": big_1000_t0,
+            "big_1000_change": big_1000_t0 - big_1000_t1
+        }
+    except:
+        pass
+    return None
+
+
+
 @lru_cache(maxsize=256) # 使用 lru_cache 取代 st.cache_data：@st.cache_data 在 ThreadPoolExecutor 執行緒中不可靠
 def fetch_yfinance_surprise(ticker):
     """獲取 yfinance 盈餘意外與分析師預估數據（使用 lru_cache 確保線程安全）"""
@@ -526,6 +641,7 @@ def get_single_stock_fundamentals(args):
     monthly_rev = fetch_finmind_monthly_revenue(stock_id)
     surprise_json = fetch_yfinance_surprise(ticker)
     inst_raw = fetch_finmind_institutional(stock_id, inst_start_date_str, backtest_date_str)
+    tdcc_raw = fetch_tdcc_holding_shares_cached(stock_id, backtest_date_str)
     
     # 2. 計算基本面與籌碼指標
     c33 = process_code33(financials, backtest_date_str)
@@ -533,7 +649,7 @@ def get_single_stock_fundamentals(args):
     surprise = process_earnings_surprise(surprise_json, backtest_date)
     chip = process_chip_flow(inst_raw, backtest_date_str)
     
-    return ticker, c33, mrev, surprise, chip
+    return ticker, c33, mrev, surprise, chip, tdcc_raw
 
 def fetch_all_fundamentals(tickers, backtest_date):
     """併發加載所有股票的基本面與籌碼資料"""
@@ -541,12 +657,13 @@ def fetch_all_fundamentals(tickers, backtest_date):
     args_list = [(ticker, backtest_date) for ticker in tickers]
     with ThreadPoolExecutor(max_workers=20) as executor:
         futures_results = list(executor.map(get_single_stock_fundamentals, args_list))
-    for ticker, c33, mrev, surprise, chip in futures_results:
+    for ticker, c33, mrev, surprise, chip, tdcc in futures_results:
         results[ticker] = {
             "c33": c33,
             "mrev": mrev,
             "surprise": surprise,
-            "chip": chip
+            "chip": chip,
+            "tdcc": tdcc
         }
     return results
 
@@ -596,6 +713,7 @@ with st.sidebar.form("sepa_integrated_form"):
     
     is_backtesting = backtest_date < datetime.today().date()
     show_fundamental = st.checkbox("🔬 顯示基本面分析標籤", value=False, help="開啟後，下方象限列表個股名稱下方將顯示 Code 33、月營收與盈餘意外之詳細徽章")
+    show_chip = st.checkbox("🐳 顯示法人與集保籌碼標籤", value=False, help="開啟後，下方象限列表個股名稱下方將顯示外資/投信近5日買賣超與集保大戶/散戶增減變動")
     submit_btn = st.form_submit_button("🚀 執行雙軌交叉選股分析")
 
 def get_stocks_pool(text):
@@ -848,6 +966,27 @@ if submit_btn or st.session_state.first_run:
                         chip_data = fund_data.get("chip", {"foreign_5d": 0.0, "trust_5d": 0.0, "dealer_5d": 0.0, "total_5d": 0.0})
                         foreign_5d = chip_data.get("foreign_5d", 0.0)
                         trust_5d = chip_data.get("trust_5d", 0.0)
+                        
+                        # 讀取集保週數據
+                        tdcc_data = fund_data.get("tdcc")
+                        if tdcc_data:
+                            big_1000_chg = tdcc_data.get("big_1000_change")
+                            big_400_chg = tdcc_data.get("big_400_change")
+                            retail_chg = tdcc_data.get("retail_change")
+                            
+                            big_desc = ""
+                            if big_1000_chg is not None and abs(big_1000_chg) > 0.001:
+                                big_desc = f"大戶1000:{'增' if big_1000_chg > 0 else '減'}({big_1000_chg:+.2f}%)"
+                            elif big_400_chg is not None and abs(big_400_chg) > 0.001:
+                                big_desc = f"大戶400:{'增' if big_400_chg > 0 else '減'}({big_400_chg:+.2f}%)"
+                                
+                            retail_desc = ""
+                            if retail_chg is not None and abs(retail_chg) > 0.001:
+                                retail_desc = f"散戶:{'增' if retail_chg > 0 else '減'}({retail_chg:+.2f}%)"
+                                
+                            tdcc_display = f"{big_desc} | {retail_desc}" if (big_desc and retail_desc) else (big_desc or retail_desc or "無變動")
+                        else:
+                            tdcc_display = "—"
 
                         integrated_results.append({
                             "ticker": ticker, # 隱藏欄位
@@ -861,6 +1000,7 @@ if submit_btn or st.session_state.first_run:
                             "💥 盈餘意外": surprise_display,
                             "外資5日超(張)": foreign_5d,
                             "投信5日超(張)": trust_5d,
+                            "集保周變動": tdcc_display,
                             "50MA乖離率(%)": bias_50,
                             "IBD式 絕對分數": ibd, "對比 0050 超額強度": ibd - benchmark_ibd_score,
                             "短線抗跌韌性分數": resilience, "逆風勝率": f"{outperform} / {total_panic_days} 天",
@@ -874,7 +1014,7 @@ if submit_btn or st.session_state.first_run:
                     perf_col_name = f"後續{holding_days}日實際報酬(%)"
                     
                     fundamental_cols = ["🧪 Code 33", "🚀 月營收爆發", "💥 盈餘意外"]
-                    chip_cols = ["外資5日超(張)", "投信5日超(張)"]
+                    chip_cols = ["外資5日超(張)", "投信5日超(張)", "集保周變動"]
                     
                     for f_col in fundamental_cols + chip_cols:
                         if f_col in cols:
@@ -939,7 +1079,8 @@ if submit_btn or st.session_state.first_run:
                         "🚀 月營收爆發": st.column_config.TextColumn("🚀 月營收爆發", help="月營收創12M新高 或 YoY連2月加速"),
                         "💥 盈餘意外": st.column_config.TextColumn("💥 盈餘意外", help="有分析師預估值且已公佈實際EPS時顯示。— 表示無預估值"),
                         "外資5日超(張)": st.column_config.NumberColumn("外資5日買超(張)", format="%+d"),
-                        "投信5日超(張)": st.column_config.NumberColumn("投信5日買超(張)", format="%+d")
+                        "投信5日超(張)": st.column_config.NumberColumn("投信5日買超(張)", format="%+d"),
+                        "集保周變動": st.column_config.TextColumn("集保周變動 (大戶/散戶)", help="集保大戶持股比周增減與100張以下散戶持股比周增減之幅度(%)")
                     }
                     if is_backtesting:
                         column_config_dict[perf_col_name] = st.column_config.NumberColumn(f"🎯 後續{holding_days}日報酬", format="%.2f%%")
@@ -957,7 +1098,7 @@ if submit_btn or st.session_state.first_run:
                     if show_fundamental:
                         desc_lines.append("🧪 <b>Code 33</b> = 連3季 EPS/營收/淨利率三加速&nbsp;｜&nbsp;🚀 <b>月營收</b> = 創12M新高 或 YoY連2月加速&nbsp;｜&nbsp;💥 <b>盈餘意外</b> = 實際優於/遜於預估（無預估值不顯示）")
                     if show_chip:
-                        desc_lines.append("🐳 <b>外資5D</b> = 外資近5日累計買賣超張數&nbsp;｜&nbsp;🎯 <b>投信5D</b> = 投信近5日累計買賣超張數（雙軌強勢股核心指標）")
+                        desc_lines.append("🐳 <b>外資5D / 投信5D</b> = 累計買賣超張數（投信在台股中小型動能股極具參考價值）<br>&nbsp;&nbsp;👥 <b>集保大戶/散戶</b> = 周大戶(1000或400張以上)持股比增減、散戶(100張以下)持股比增減（籌碼集中度關鍵）")
                         
                     if desc_lines:
                         st.markdown(
@@ -967,7 +1108,7 @@ if submit_btn or st.session_state.first_run:
                             unsafe_allow_html=True
                         )
                     else:
-                        st.caption(f"💡 括號內為 50MA 乖離率(%)。右側標註為【後續 {holding_days} 日回測實際報酬率】。可在左側開啟「🔬 顯示基本面分析標籤」與「🐳 顯示法人籌碼標籤」查看更多維度資訊。")
+                        st.caption(f"💡 括號內為 50MA 乖離率(%)。右側標註為【後續 {holding_days} 日回測實際報酬率】。可在左側開啟「🔬 顯示基本面分析標籤」與「🐳 顯示法人與集保籌碼標籤」查看更多維度資訊。")
                     
                     with st.spinner("🚨 正在同步證交所/櫃買中心處置股公告..."):
                         DISPOSITION_MAP = fetch_disposition_data()
@@ -1113,6 +1254,57 @@ if submit_btn or st.session_state.first_run:
                                         f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
                                         f'margin-right:5px;cursor:help;" title="投信近5日累計賣超 {abs(t_val):.1f} 張">🎯 投信5D {t_val:.0f}張</span>'
                                     )
+
+                                # TDCC 集保大戶/散戶週變動
+                                tdcc = fund.get("tdcc")
+                                if tdcc:
+                                    big_1000_c = tdcc.get("big_1000_change", 0.0)
+                                    big_400_c = tdcc.get("big_400_change", 0.0)
+                                    ret_c = tdcc.get("retail_change", 0.0)
+
+                                    if abs(big_1000_c) > 0.001:
+                                        big_title = f"集保 1000張 大戶持股周變動: {big_1000_c:+.2f}%"
+                                        if big_1000_c > 0:
+                                            sub_badges_list.append(
+                                                f'<span style="background:#f6ffed;color:#389e0d;border:1px solid #b7eb8f;'
+                                                f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
+                                                f'margin-right:5px;cursor:help;" title="{big_title}">👥 大戶增</span>'
+                                            )
+                                        else:
+                                            sub_badges_list.append(
+                                                f'<span style="background:#fff1f0;color:#cf1322;border:1px solid #ffa39e;'
+                                                f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
+                                                f'margin-right:5px;cursor:help;" title="{big_title}">👥 大戶減</span>'
+                                            )
+                                    elif abs(big_400_c) > 0.001:
+                                        big_title = f"集保 400張 大戶持股周變動: {big_400_c:+.2f}%"
+                                        if big_400_c > 0:
+                                            sub_badges_list.append(
+                                                f'<span style="background:#f6ffed;color:#389e0d;border:1px solid #b7eb8f;'
+                                                f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
+                                                f'margin-right:5px;cursor:help;" title="{big_title}">👥 大戶(400)增</span>'
+                                            )
+                                        else:
+                                            sub_badges_list.append(
+                                                f'<span style="background:#fff1f0;color:#cf1322;border:1px solid #ffa39e;'
+                                                f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
+                                                f'margin-right:5px;cursor:help;" title="{big_title}">👥 大戶(400)減</span>'
+                                            )
+
+                                    if abs(ret_c) > 0.001:
+                                        ret_title = f"集保 100張以下 散戶持股周變動: {ret_c:+.2f}%"
+                                        if ret_c < 0:
+                                            sub_badges_list.append(
+                                                f'<span style="background:#f6ffed;color:#389e0d;border:1px solid #b7eb8f;'
+                                                f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
+                                                f'margin-right:5px;cursor:help;" title="{ret_title}">👥 散戶減</span>'
+                                            )
+                                        else:
+                                            sub_badges_list.append(
+                                                f'<span style="background:#fff1f0;color:#cf1322;border:1px solid #ffa39e;'
+                                                f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
+                                                f'margin-right:5px;cursor:help;" title="{ret_title}">👥 散戶增</span>'
+                                            )
 
                             # 統一繪製縮排子行
                             if sub_badges_list:
