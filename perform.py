@@ -817,6 +817,87 @@ def get_stocks_pool(text):
             
     return list({item['id']: item for item in pool}.values())
 
+def fetch_official_latest_prices(latest_date):
+    """
+    從證交所(MI_INDEX)與櫃買中心官方 OpenAPI 下載指定日期的最精確收盤價與成交量，
+    用來修補 yfinance 最新一天的 NaN 或延遲數據。
+    """
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    
+    date_str = latest_date.strftime('%Y%m%d')
+    headers = {"User-Agent": "Mozilla/5.0"}
+    prices = {}
+    
+    # 1. 抓取 TWSE (上市)
+    try:
+        url = f"https://www.twse.com.tw/exchangeReport/MI_INDEX?response=json&date={date_str}&type=ALL"
+        r = requests.get(url, headers=headers, verify=False, timeout=8)
+        if r.status_code == 200:
+            data = r.json()
+            if "tables" in data:
+                for tbl in data["tables"]:
+                    data_rows = tbl.get("data", [])
+                    if len(data_rows) > 500:
+                        for row in data_rows:
+                            if len(row) > 8:
+                                code = str(row[0]).strip()
+                                if code.isdigit() and len(code) == 4:
+                                    close_str = str(row[8]).replace(',', '').strip()
+                                    vol_str = str(row[2]).replace(',', '').strip()
+                                    try:
+                                        prices[f"{code}.TW"] = {
+                                            "Close": float(close_str) if close_str and close_str != '--' else None,
+                                            "Volume": float(vol_str) if vol_str else None
+                                        }
+                                    except ValueError:
+                                        pass
+    except Exception:
+        pass
+        
+    # 若 MI_INDEX 抓取失敗，再嘗試 TWSE OpenAPI
+    if not any(k.endswith(".TW") for k in prices):
+        try:
+            url = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
+            r = requests.get(url, headers=headers, verify=False, timeout=8)
+            if r.status_code == 200:
+                for item in r.json():
+                    code = item.get("Code", "").strip()
+                    close_str = item.get("ClosingPrice", "").strip()
+                    vol_str = item.get("TradeVolume", "").strip()
+                    if code and len(code) == 4:
+                        try:
+                            prices[f"{code}.TW"] = {
+                                "Close": float(close_str) if close_str else None,
+                                "Volume": float(vol_str) if vol_str else None
+                            }
+                        except ValueError:
+                            pass
+        except Exception:
+            pass
+
+    # 2. 抓取 TPEx (上櫃)
+    try:
+        url = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
+        r = requests.get(url, headers=headers, verify=False, timeout=8)
+        if r.status_code == 200:
+            for item in r.json():
+                code = item.get("SecuritiesCompanyCode", "").strip()
+                close_str = item.get("Close", "").strip()
+                vol_str = item.get("TradingShares", "").strip()
+                if code and len(code) == 4:
+                    try:
+                        prices[f"{code}.TWO"] = {
+                            "Close": float(close_str) if close_str else None,
+                            "Volume": float(vol_str) if vol_str else None
+                        }
+                    except ValueError:
+                        pass
+    except Exception:
+        pass
+
+    return prices
+
 if 'first_run' not in st.session_state:
     st.session_state.first_run = True
 
@@ -841,14 +922,30 @@ if submit_btn or st.session_state.first_run:
                 df_all = fetch_and_sync_data(tuple(all_tickers), start_date_long.strftime('%Y-%m-%d'), download_end_date.strftime('%Y-%m-%d'))
                 
                 df_adj = df_all['Close'] if 'Close' in df_all.columns.levels[0] else df_all['Adj Close']
-                # 智慧補值：如果最新的收盤價是 NaN，但當天有交易資料 (Open 或 High 不是 NaN)，我們用 Open 或 High 補齊 Close，以避免整天被 dropna() 濾除。
+                df_vol = df_all['Volume']
+                
+                # 只有最新一天才需要嘗試從官方 API 修補（若是回溯歷史，yfinance 的歷史資料已完全正常，無需修補）
+                if not is_backtesting and not df_adj.empty:
+                    latest_date = df_adj.index[-1]
+                    # 只有當最新一天的 Close 中有任何 NaN 時，才去抓取官方 API
+                    if df_adj.loc[latest_date].isna().any():
+                        with st.spinner("🚨 正在向證交所與櫃買中心獲取最新官方收盤行情修補..."):
+                            official_quotes = fetch_official_latest_prices(latest_date)
+                            if official_quotes:
+                                for ticker in df_adj.columns:
+                                    if ticker in official_quotes:
+                                        p_info = official_quotes[ticker]
+                                        if p_info.get("Close") is not None:
+                                            df_adj.loc[latest_date, ticker] = p_info["Close"]
+                                        if p_info.get("Volume") is not None:
+                                            df_vol.loc[latest_date, ticker] = p_info["Volume"]
+                
+                # 智慧補值與 ffill 備援，防範個別無交易量或官方沒回傳的股票
                 if 'Open' in df_all.columns.levels[0]:
                     df_adj = df_adj.fillna(df_all['Open'])
                 if 'High' in df_all.columns.levels[0]:
                     df_adj = df_adj.fillna(df_all['High'])
                 df_adj = df_adj.ffill()
-                
-                df_vol = df_all['Volume']
                 
                 b_c_all = df_adj["0050.TW"].dropna()
                 if is_backtesting:
@@ -950,15 +1047,37 @@ if submit_btn or st.session_state.first_run:
                         else:
                             is_trend_template = False
 
+                        # --- 核心：RS 分數與 IBD 絕對/相對動能計算 ---
                         if len(s_series_raw) >= 253:
-                            s_now_val = s_series_raw.iloc[-1]
-                            s_3m_val = s_series_raw.iloc[-64]
-                            s_6m_val = s_series_raw.iloc[-127]
-                            s_9m_val = s_series_raw.iloc[-190]
-                            s_1y_val = s_series_raw.iloc[-253]
-                            ibd = ((s_now_val/s_3m_val*2) + (s_now_val/s_6m_val) + (s_now_val/s_9m_val) + (s_now_val/s_1y_val)) / 5 * 100
+                            s_3m = s_series_raw.shift(63)
+                            s_6m = s_series_raw.shift(126)
+                            s_9m = s_series_raw.shift(189)
+                            s_1y = s_series_raw.shift(252)
+                            abs_rs_series = ((s_series_raw/s_3m*2) + (s_series_raw/s_6m) + (s_series_raw/s_9m) + (s_series_raw/s_1y)) / 5 * 100
+                            ibd = abs_rs_series.iloc[-1]
+                            
+                            # 對 0050 相對 RS 動能 (計算 s_series_raw / b_c 的比例序列，再套用 IBD)
+                            b_c_aligned_to_stock = b_c_all.reindex(s_series_raw.index).ffill()
+                            rel_val = s_series_raw / b_c_aligned_to_stock
+                            rel_3m = rel_val.shift(63)
+                            rel_6m = rel_val.shift(126)
+                            rel_9m = rel_val.shift(189)
+                            rel_1y = rel_val.shift(252)
+                            rel_alpha_rs_series = ((rel_val/rel_3m*2) + (rel_val/rel_6m) + (rel_val/rel_9m) + (rel_val/rel_1y)) / 5 * 100
+                            
+                            rel_alpha_rs_now = rel_alpha_rs_series.iloc[-1]
+                            alpha_sma5_now = rel_alpha_rs_series.rolling(5).mean().iloc[-1]
+                            is_rs_recovering = rel_alpha_rs_series.iloc[-1] > rel_alpha_rs_series.iloc[-2] and rel_alpha_rs_series.iloc[-1] > alpha_sma5_now
+                            
+                            # 為了相容後面 >0 的判斷，超額強度定義為 (相對強度 - 100)
+                            rel_strength_0050 = rel_alpha_rs_now - 100
                         else:
                             ibd = 0.0
+                            rel_alpha_rs_now = 0.0
+                            rel_strength_0050 = 0.0
+                            is_rs_recovering = False
+                            rel_alpha_rs_series = pd.Series(index=s_series_raw.index, dtype=float)
+                            abs_rs_series = pd.Series(index=s_series_raw.index, dtype=float)
                         
                         s_ret = s_series_raw.pct_change() * 100
                         outperform = np.sum(s_ret.reindex(panic_dates_list) > b_short_df.loc[panic_dates_list, 'Market_Return'])
@@ -966,43 +1085,69 @@ if submit_btn or st.session_state.first_run:
                         
                         is_price_new_high = False
                         is_alpha_new_high = False
+                        is_abs_rs_new_high = False
                         is_alpha_lagging = False
+                        is_abs_rs_lagging = False
+                        
                         is_vcp_80 = False
                         is_vcp_90 = False
-                        is_vcp_dead_quiet = False
-                        is_rs_recovering = False
+                        is_quiet_platform = False
                         
-                        if len(s_series_raw) >= 30:
-                            b_c_aligned_to_stock = b_c_all.reindex(s_series_raw.index).ffill()
-                            rel_close = s_series_raw / b_c_aligned_to_stock
-                            
+                        if len(s_series_raw) >= 253:
                             is_price_new_high = p_now >= s_series_raw.iloc[-31:-1].max()
-                            is_alpha_new_high = rel_close.iloc[-1] >= rel_close.iloc[-31:-1].max()
-                            is_alpha_lagging = rel_close.iloc[-1] < rel_close.iloc[-31:-1].max()
+                            is_alpha_new_high = rel_alpha_rs_series.iloc[-1] >= rel_alpha_rs_series.iloc[-31:-1].max()
+                            is_abs_rs_new_high = abs_rs_series.iloc[-1] >= abs_rs_series.iloc[-31:-1].max()
                             
-                            if len(rel_close) >= 3:
-                                is_rs_recovering = rel_close.iloc[-1] > rel_close.iloc[-2] and rel_close.iloc[-2] > rel_close.iloc[-3]
+                            is_alpha_lagging = rel_alpha_rs_series.iloc[-1] < rel_alpha_rs_series.iloc[-31:-1].max()
+                            is_abs_rs_lagging = abs_rs_series.iloc[-1] < abs_rs_series.iloc[-31:-1].max()
                             
+                            # 1. ATR 與價格壓縮比例 (a_ratio)
+                            high_s = df_all['High'][ticker].reindex(s_series_raw.index).ffill()
+                            low_s = df_all['Low'][ticker].reindex(s_series_raw.index).ffill()
+                            close_prev = s_series_raw.shift(1)
+                            tr = pd.concat([
+                                high_s - low_s,
+                                (high_s - close_prev).abs(),
+                                (low_s - close_prev).abs()
+                            ], axis=1).max(axis=1)
+                            
+                            atr_5 = tr.rolling(5).mean().iloc[-1]
+                            atr_10_ma = tr.rolling(10).mean().rolling(10).mean().iloc[-1]
+                            atr_20_ma = tr.rolling(20).mean().rolling(20).mean().iloc[-1]
+                            
+                            a_ratio_10 = atr_5 / atr_10_ma if atr_10_ma > 0 else 1.0
+                            a_ratio_20 = atr_5 / atr_20_ma if atr_20_ma > 0 else 1.0
+                            
+                            # 2. Volume 縮小比例 (v_ratio)
+                            s_vol = df_vol[ticker].dropna().reindex(s_series_raw.index).ffill()
+                            vol_5 = s_vol.rolling(5).mean().iloc[-1]
+                            vol_10 = s_vol.rolling(10).mean().iloc[-1]
+                            vol_20 = s_vol.rolling(20).mean().iloc[-1]
+                            
+                            v_ratio_10 = vol_5 / vol_10 if vol_10 > 0 else 1.0
+                            v_ratio_20 = vol_5 / vol_20 if vol_20 > 0 else 1.0
+                            
+                            # 3. 波動率緊縮
                             roll_std5 = s_series_raw.rolling(5).std(ddof=0)
                             roll_mean5 = s_series_raw.rolling(5).mean()
                             cv_5 = roll_std5 / roll_mean5
+                            cv_5_ma20 = cv_5.rolling(20).mean().iloc[-1]
+                            cv_5_now = cv_5.iloc[-1]
+                            is_tight_cv = cv_5_now < cv_5_ma20
                             
-                            if len(cv_5) >= 20:
-                                cv_5_ma20 = cv_5.rolling(20).mean()
-                                cv_5_now = cv_5.iloc[-1]
-                                cv_5_ma20_now = cv_5_ma20.iloc[-1]
-                                
-                                is_vcp_dead_quiet = cv_5_now < cv_5_ma20_now * 0.50
-                                is_vcp_80 = cv_5_now < cv_5_ma20_now * 0.80
-                                is_vcp_90 = cv_5_now < cv_5_ma20_now * 0.90
+                            # VCP 狀態判斷 (對齊 TradingView 邏輯)
+                            is_vcp_80 = (a_ratio_20 < 0.8 or a_ratio_10 < 0.8) and (v_ratio_20 < 0.85 or v_ratio_10 < 0.85) and cond5 and is_tight_cv
+                            is_vcp_90 = (a_ratio_20 < 0.9 or a_ratio_10 < 0.9) and (v_ratio_20 < 0.95 or v_ratio_10 < 0.95) and cond5 and is_tight_cv
+                            is_quiet_platform = s_vol.rolling(3).mean().iloc[-1] < vol_20 * 0.7 and is_tight_cv
                         
-                        is_rs_leading = (not is_price_new_high) and is_alpha_new_high
-                        is_div_warning = is_price_new_high and is_alpha_lagging
+                        is_div_warning = is_price_new_high and (is_alpha_lagging or is_abs_rs_lagging)
+                        is_abs_leading = (not is_price_new_high) and is_abs_rs_new_high
+                        is_alpha_leading = (not is_price_new_high) and is_alpha_new_high
                         
-                        if is_vcp_dead_quiet:
-                            struct_status = "💤 價格波動沉寂(Dead Quiet)"
-                        elif is_vcp_80:
+                        if is_vcp_80:
                             struct_status = "💎 極致壓縮(80%+CV)"
+                        elif is_quiet_platform:
+                            struct_status = "💤 Dead Quiet"
                         elif is_vcp_90:
                             struct_status = "🔥 相對壓縮(90%+CV)"
                         elif is_rs_recovering:
@@ -1011,8 +1156,12 @@ if submit_btn or st.session_state.first_run:
                             struct_status = "⏳ 區間整理"
                                 
                         lead_prefix = ""
-                        if is_rs_leading:
+                        if is_alpha_leading and is_abs_leading:
                             lead_prefix = "🌟 雙軌領先 | "
+                        elif is_alpha_leading:
+                            lead_prefix = "🌟 Alpha領先 | "
+                        elif is_abs_leading:
+                            lead_prefix = "🌟 RS領先 | "
                         elif is_div_warning:
                             lead_prefix = "⚠️ 雙軌背離 | "
                             
@@ -1047,7 +1196,7 @@ if submit_btn or st.session_state.first_run:
                             "🧪 Code 33": c33_display,
                             "🚀 月營收爆發": mrev_display,
                             "50MA乖離率(%)": bias_50,
-                            "IBD式 絕對分數": ibd, "對比 0050 超額強度": ibd - benchmark_ibd_score,
+                            "IBD式 絕對分數": ibd, "對比 0050 超額強度": rel_strength_0050,
                             "短線抗跌韌性分數": resilience, "逆風勝率": f"{outperform} / {total_panic_days} 天",
                             "逆風上漲天數": f"{np.sum(s_ret.reindex(panic_dates_list) > 0)} 天",
                             perf_col_key: future_return
