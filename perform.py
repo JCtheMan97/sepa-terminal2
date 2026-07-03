@@ -841,10 +841,20 @@ if submit_btn or st.session_state.first_run:
                 df_all = fetch_and_sync_data(tuple(all_tickers), start_date_long.strftime('%Y-%m-%d'), download_end_date.strftime('%Y-%m-%d'))
                 
                 df_adj = df_all['Close'] if 'Close' in df_all.columns.levels[0] else df_all['Adj Close']
+                # 智慧補值：如果最新的收盤價是 NaN，但當天有交易資料 (Open 或 High 不是 NaN)，我們用 Open 或 High 補齊 Close，以避免整天被 dropna() 濾除。
+                if 'Open' in df_all.columns.levels[0]:
+                    df_adj = df_adj.fillna(df_all['Open'])
+                if 'High' in df_all.columns.levels[0]:
+                    df_adj = df_adj.fillna(df_all['High'])
+                df_adj = df_adj.ffill()
+                
                 df_vol = df_all['Volume']
                 
                 b_c_all = df_adj["0050.TW"].dropna()
-                b_c = b_c_all.loc[:end_date.strftime('%Y-%m-%d')]
+                if is_backtesting:
+                    b_c = b_c_all.loc[:end_date.strftime('%Y-%m-%d')]
+                else:
+                    b_c = b_c_all
                 
                 if b_c.empty:
                     st.error("❌ 回溯基準日無交易數據或超出歷史範圍，請重新選擇。")
@@ -897,7 +907,10 @@ if submit_btn or st.session_state.first_run:
                             continue
                         
                         s_series_raw_all = df_adj[ticker].dropna()
-                        s_series_raw = s_series_raw_all.loc[:end_date.strftime('%Y-%m-%d')]
+                        if is_backtesting:
+                            s_series_raw = s_series_raw_all.loc[:end_date.strftime('%Y-%m-%d')]
+                        else:
+                            s_series_raw = s_series_raw_all
                         
                         if s_series_raw.empty:
                             skipped_stocks.append(stock["name"])
