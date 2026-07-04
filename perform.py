@@ -1203,7 +1203,7 @@ if submit_btn or st.session_state.first_run:
                         3. 200MA 處於上升趨勢（至少上揚 1 個月，此系統比對 22 天前數據）
                         4. 50MA > 150MA 且 50MA > 200MA（中期均線多頭黃金交叉）
                         5. 現價 > 50MA（股價站穩中期生命線）
-                        6. 現價較過去 52 週最低點高出至少 25%（展現強勁築底反彈力道）
+                                                6. 現價較過去 52 週最低點高出至少 25%（展現強勁築底反彈力道）
                         7. 現價距離過去 52 週最高點在 25% 以內（高檔強勢整理，伺機向上突破樞紐點）
                         """)
                     
@@ -1235,7 +1235,7 @@ if submit_btn or st.session_state.first_run:
                         desc_lines.append(
                             "🔬 <b>馬克的 SEPA 基本面心法備註</b>：<br>"
                             "&nbsp;&nbsp;• <b>「技術面決定進場時機，基本面決定漲幅高度」</b>：馬克指出，90% 的超級飆股在發動主升段前，其盈餘與營收均呈現『加速增長』的特徵。<br>"
-                            "&nbsp;&nbsp;• <b>Code 33 三加速</b>：代表連續 3 季 EPS YoY、營收 YoY、淨利率同步攀升，是機構資金（Institutional Money）鎖定吃貨的最強護城河。<br>"
+                            "&nbsp;&nbsp;• <b>Code 33 三加速</b>：代表連續 3 季 EPS YoY、營收 YoY、淨利率同步攀セン，是機構資金（Institutional Money）鎖定吃貨的最強護城河。<br>"
                             "&nbsp;&nbsp;• <b>月營收爆發</b>：在季報公佈前，單月營收創 12 個月新高或 YoY 連續加速，是領先確認終端銷售動能爆發的即時信號。"
                         )
                         
@@ -1304,48 +1304,49 @@ if submit_btn or st.session_state.first_run:
                             fund = FUNDAMENTAL_RESULTS.get(ticker, {})
 
                             if show_fundamental:
+                                details_lines = []
+                                
                                 # 🧪 Code 33
                                 c33 = fund.get("c33", {})
                                 if c33.get("active", False):
-                                    c33_traj = c33.get("trajectory", "").replace('"', '&quot;').replace("\\n", "&#10;")
+                                    c33_traj = c33.get("trajectory", "")
                                     sub_badges_list.append(
                                         f'<span style="background:#e6f7ff;color:#0050b3;border:1px solid #91d5ff;'
                                         f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
-                                        f'margin-right:5px;cursor:help;" title="【Code 33】連3季 EPS/營收/淨利率同步加速&#10;{c33_traj}">🧪 Code 33</span>'
+                                        f'margin-right:5px;">🧪 Code 33</span>'
                                     )
+                                    details_lines.append(f"🧪 <b>Code 33 加速數據：</b><br>" + c33_traj.replace("\n", "<br>"))
 
                                 # 🚀 月營收
                                 mrev = fund.get("mrev", {})
                                 mrev_12h = mrev.get("is_12m_high", False)
                                 mrev_acc = mrev.get("is_accelerating", False)
-                                mrev_traj = mrev.get("trajectory", "").replace('"', '&quot;').replace("\\n", "&#10;")
-                                if mrev_12h and mrev_acc:
+                                mrev_traj = mrev.get("trajectory", "")
+                                if mrev_12h or mrev_acc:
+                                    status_name = "月營收爆發" if (mrev_12h and mrev_acc) else ("營收新高" if mrev_12h else "營收YoY加速")
                                     sub_badges_list.append(
                                         f'<span style="background:#f6ffed;color:#389e0d;border:1px solid #b7eb8f;'
                                         f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
-                                        f'margin-right:5px;cursor:help;" title="【月營收新高 &amp; YoY加速】&#10;{mrev_traj}">🚀 月營收爆發</span>'
+                                        f'margin-right:5px;">🚀 {status_name}</span>'
                                     )
-                                elif mrev_12h:
-                                    sub_badges_list.append(
-                                        f'<span style="background:#f6ffed;color:#389e0d;border:1px solid #b7eb8f;'
-                                        f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
-                                        f'margin-right:5px;cursor:help;" title="【月營收創12M新高】&#10;{mrev_traj}">🚀 營收新高</span>'
+                                    details_lines.append(f"🚀 <b>月營收動能軌跡：</b><br>" + mrev_traj.replace("\n", "<br>"))
+                                    
+                                if sub_badges_list:
+                                    badge_html = "".join(sub_badges_list)
+                                    lines.append(
+                                        f"  <div style='margin:-2px 0 6px 20px;line-height:2;opacity:0.95;'>"
+                                        f"<span style='color:#bbb;font-size:0.8em;margin-right:4px;'>└</span>"
+                                        f"{badge_html}</div>"
                                     )
-                                elif mrev_acc:
-                                    sub_badges_list.append(
-                                        f'<span style="background:#f6ffed;color:#389e0d;border:1px solid #b7eb8f;'
-                                        f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
-                                        f'margin-right:5px;cursor:help;" title="【YoY連續兩月加速】&#10;{mrev_traj}">🚀 營收YoY加速</span>'
+                                    
+                                if details_lines:
+                                    details_content = "<br>".join(details_lines)
+                                    lines.append(
+                                        f"<details style='margin:-2px 0 8px 30px; font-size:0.8em;'>"
+                                        f"<summary style='cursor:pointer; outline:none; color:#8c8c8c; font-size:0.9em;'>🔬 點擊展開詳細軌跡</summary>"
+                                        f"<div style='padding:6px 10px; margin-top:4px; border-left:2px solid rgba(128,128,128,0.3); line-height:1.4; color:inherit; background:rgba(128,128,128,0.05); border-radius:4px;'>{details_content}</div>"
+                                        f"</details>"
                                     )
-
-                            # 統一繪製縮排子行
-                            if sub_badges_list:
-                                badge_html = "".join(sub_badges_list)
-                                lines.append(
-                                    f"  <div style='margin:-2px 0 6px 20px;line-height:2;opacity:0.95;'>"
-                                    f"<span style='color:#bbb;font-size:0.8em;margin-right:4px;'>└</span>"
-                                    f"{badge_html}</div>"
-                                )
 
                         return "\n".join(lines)
 
