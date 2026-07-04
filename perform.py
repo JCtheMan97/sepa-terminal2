@@ -4,6 +4,7 @@ import numpy as np
 import yfinance as yf
 from datetime import datetime, timedelta
 from functools import lru_cache
+from bs4 import BeautifulSoup
 import os
 import re
 import requests
@@ -793,6 +794,7 @@ with st.sidebar.form("sepa_integrated_form"):
     holding_days = st.number_input("回溯後預計持有天數 (交易日)", min_value=1, max_value=120, value=20, step=1)
     
     is_backtesting = backtest_date < datetime.today().date()
+    show_fundamental = st.checkbox("🔬 顯示基本面分析標籤", value=True)
     submit_btn = st.form_submit_button("🚀 執行雙軌交叉選股分析")
 
 # --- 🔌 API 連線與資料時間診斷 ---
