@@ -204,11 +204,47 @@ def fetch_disposition_data_raw():
 
     return disposition_map
 
-# --- 🚀 基本面 API 數據獲取與快取 ---
+# --- 處置股快取：使用 st.session_state 確保跨 rerun 持久化 ---
+def _load_disposition_safe():
+    """安全載入處置股資料，存入 session_state 以跨 rerun 持久化。"""
+    now = datetime.now()
+    # 快取命中：30 分鐘內不重複抓取
+    if "_disp_time" in st.session_state:
+        elapsed = (now - st.session_state._disp_time).total_seconds()
+        if elapsed < 1800 and st.session_state.get("DISPOSITION_MAP"):
+            return st.session_state.DISPOSITION_MAP
+    # 嘗試抓取
+    res = fetch_disposition_data_raw()
+    if res:
+        st.session_state.DISPOSITION_MAP = res
+        st.session_state._disp_time = now
+    elif "DISPOSITION_MAP" not in st.session_state:
+        st.session_state.DISPOSITION_MAP = {}
+    return st.session_state.DISPOSITION_MAP
 
-@st.cache_data(ttl=86400) # 財報每季發布，快取1天
+DISPOSITION_MAP = _load_disposition_safe()
+if DISPOSITION_MAP:
+    st.sidebar.caption(f"🚨 處置股監控：目前偵測到 {len(DISPOSITION_MAP):,} 檔全市場處置中證券")
+
+# --- 🚀 基本面 API 數據獲取（快取存入 session_state 以跨 rerun 持久化） ---
+
+def _get_fin_cache():
+    if "_fin_cache" not in st.session_state:
+        st.session_state._fin_cache = {}
+    return st.session_state._fin_cache
+
+def _get_rev_cache():
+    if "_rev_cache" not in st.session_state:
+        st.session_state._rev_cache = {}
+    return st.session_state._rev_cache
+
 def fetch_finmind_financials(stock_id):
-    """獲取 FinMind 季度損益表數據"""
+    """獲取季度損益表數據 (首選 FinMind，失敗則自動以 yfinance 作為免費備援)"""
+    cache = _get_fin_cache()
+    if stock_id in cache:
+        return cache[stock_id]
+        
+    # 1. 嘗試 FinMind API
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
         "dataset": "TaiwanStockFinancialStatements",
@@ -216,131 +252,59 @@ def fetch_finmind_financials(stock_id):
         "start_date": "2024-01-01"
     }
     try:
-        r = requests.get(url, params=params, timeout=10)
+        r = requests.get(url, params=params, timeout=8)
         if r.status_code == 200:
-            return r.json().get("data", [])
+            data = r.json().get("data", [])
+            if data:
+                _get_fin_cache()[stock_id] = data
+                return data
     except Exception:
         pass
+        
+    # 2. 備援機制：使用 yfinance 獲取季度財報數據 (免費且免 Token)
+    for suffix in [".TW", ".TWO"]:
+        try:
+            ticker = f"{stock_id}{suffix}"
+            tick = yf.Ticker(ticker)
+            qf = tick.quarterly_financials
+            if qf is not None and not qf.empty:
+                # 建立符合 process_code33 格式的財務字典清單
+                records = []
+                # 智能對齊會計科目名稱
+                rev_row = "Total Revenue" if "Total Revenue" in qf.index else ("Operating Revenue" if "Operating Revenue" in qf.index else None)
+                net_row = "Net Income" if "Net Income" in qf.index else ("Net Income Including Noncontrolling Interests" if "Net Income Including Noncontrolling Interests" in qf.index else None)
+                eps_row = "Basic EPS" if "Basic EPS" in qf.index else ("Diluted EPS" if "Diluted EPS" in qf.index else None)
+                
+                for col_date in qf.columns:
+                    date_str = col_date.strftime('%Y-%m-%d')
+                    if rev_row:
+                        val = qf.loc[rev_row, col_date]
+                        if pd.notna(val):
+                            records.append({'date': date_str, 'stock_id': stock_id, 'type': 'Revenue', 'value': float(val)})
+                    if net_row:
+                        val = qf.loc[net_row, col_date]
+                        if pd.notna(val):
+                            records.append({'date': date_str, 'stock_id': stock_id, 'type': 'IncomeAfterTaxes', 'value': float(val)})
+                    if eps_row:
+                        val = qf.loc[eps_row, col_date]
+                        if pd.notna(val):
+                            records.append({'date': date_str, 'stock_id': stock_id, 'type': 'EPS', 'value': float(val)})
+                
+                if records:
+                    _get_fin_cache()[stock_id] = records
+                    return records
+        except Exception:
+            pass
+            
     return []
 
-@lru_cache(maxsize=1024)
-def fetch_tdcc_holding_shares_cached(stock_id, target_date_str):
-    """獲取集保結算所個股股權分散表並計算變動"""
-    target_date_clean = target_date_str.replace("-", "")
-    url = "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock"
-    }
-    
-    session = requests.Session()
-    try:
-        # GET 1 to get token
-        import urllib3
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        
-        r_get1 = session.get(url, headers=headers, verify=False, timeout=8)
-        if r_get1.status_code != 200:
-            return None
-        soup_get1 = BeautifulSoup(r_get1.text, 'html.parser')
-        token_tag1 = soup_get1.find('input', {'name': 'SYNCHRONIZER_TOKEN'})
-        if not token_tag1:
-            return None
-        token1 = token_tag1.get('value')
-        
-        select_tag = soup_get1.find('select', {'name': 'scaDate'})
-        if not select_tag:
-            return None
-        dates = [opt.get('value') for opt in select_tag.find_all('option')]
-        
-        # Filter dates
-        dates_filtered = [d for d in dates if d <= target_date_clean]
-        if len(dates_filtered) < 2:
-            return None
-            
-        date_t0 = dates_filtered[0]
-        date_t1 = dates_filtered[1]
-        
-        # POST 1
-        payload_t0 = {
-            "SYNCHRONIZER_TOKEN": token1,
-            "SYNCHRONIZER_URI": "/portal/zh/smWeb/qryStock",
-            "method": "submit",
-            "sqlMethod": "StockNo",
-            "stockNo": stock_id,
-            "scaDate": date_t0
-        }
-        r_t0 = session.post(url, data=payload_t0, headers=headers, verify=False, timeout=8)
-        
-        # GET 2
-        r_get2 = session.get(url, headers=headers, verify=False, timeout=8)
-        soup_get2 = BeautifulSoup(r_get2.text, 'html.parser')
-        token_tag2 = soup_get2.find('input', {'name': 'SYNCHRONIZER_TOKEN'})
-        token2 = token_tag2.get('value') if token_tag2 else token1
-        
-        # POST 2
-        payload_t1 = {
-            "SYNCHRONIZER_TOKEN": token2,
-            "SYNCHRONIZER_URI": "/portal/zh/smWeb/qryStock",
-            "method": "submit",
-            "sqlMethod": "StockNo",
-            "stockNo": stock_id,
-            "scaDate": date_t1
-        }
-        r_t1 = session.post(url, data=payload_t1, headers=headers, verify=False, timeout=8)
-        
-        def parse_dist(html):
-            soup = BeautifulSoup(html, 'html.parser')
-            tables = soup.find_all('table')
-            if len(tables) < 2:
-                return None
-            rows = tables[1].find_all('tr')
-            dist = {}
-            for row in rows[1:]:
-                cols = [col.text.strip() for col in row.find_all(['td', 'th'])]
-                if len(cols) >= 5:
-                    try:
-                        dist[cols[0]] = float(cols[4].replace('%', '').replace(',', ''))
-                    except:
-                        pass
-            return dist
-            
-        dist_t0 = parse_dist(r_t0.text)
-        dist_t1 = parse_dist(r_t1.text)
-        if not dist_t0 or not dist_t1:
-            return None
-            
-        # Retail (<100張) = levels 1 to 9
-        retail_t0 = sum(dist_t0.get(str(i), 0.0) for i in range(1, 10))
-        retail_t1 = sum(dist_t1.get(str(i), 0.0) for i in range(1, 10))
-        
-        # Big 400 (>400張) = levels 12 to 15
-        big_400_t0 = sum(dist_t0.get(str(i), 0.0) for i in range(12, 16))
-        big_400_t1 = sum(dist_t1.get(str(i), 0.0) for i in range(12, 16))
-        
-        # Big 1000 (>1000張) = level 15
-        big_1000_t0 = dist_t0.get("15", 0.0)
-        big_1000_t1 = dist_t1.get("15", 0.0)
-        
-        return {
-            "date_t0": date_t0,
-            "date_t1": date_t1,
-            "retail_t0": retail_t0,
-            "retail_change": retail_t0 - retail_t1,
-            "big_400_t0": big_400_t0,
-            "big_400_change": big_400_t0 - big_400_t1,
-            "big_1000_t0": big_1000_t0,
-            "big_1000_change": big_1000_t0 - big_1000_t1
-        }
-    except:
-        pass
-    return None
-
-
-
-@st.cache_data(ttl=3600) # 月營收每月發布，快取1小時
 def fetch_finmind_monthly_revenue(stock_id):
-    """獲取 FinMind 月營收數據"""
+    """獲取月營收數據 (首選 FinMind，失敗則自動以 yfinance 季度營收近似)"""
+    cache = _get_rev_cache()
+    if stock_id in cache:
+        return cache[stock_id]
+        
+    # 1. 嘗試 FinMind API
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
         "dataset": "TaiwanStockMonthRevenue",
@@ -348,139 +312,60 @@ def fetch_finmind_monthly_revenue(stock_id):
         "start_date": "2024-01-01"
     }
     try:
-        r = requests.get(url, params=params, timeout=10)
+        r = requests.get(url, params=params, timeout=8)
         if r.status_code == 200:
-            return r.json().get("data", [])
+            data = r.json().get("data", [])
+            if data:
+                _get_rev_cache()[stock_id] = data
+                return data
     except Exception:
         pass
+
+    # 2. 備援：yfinance 季度營收轉月營收近似值
+    for suffix in [".TW", ".TWO"]:
+        try:
+            tick = yf.Ticker(f"{stock_id}{suffix}")
+            qf = tick.quarterly_financials
+            if qf is None or qf.empty:
+                continue
+            rev_row = "Total Revenue" if "Total Revenue" in qf.index else ("Operating Revenue" if "Operating Revenue" in qf.index else None)
+            if not rev_row:
+                continue
+            records = []
+            for col_date in sorted(qf.columns):
+                val = qf.loc[rev_row, col_date]
+                if pd.isna(val) or float(val) <= 0:
+                    continue
+                quarterly_rev = float(val)
+                # 將季度營收均分為 3 個月（以季末月為主月份，往前推 2 個月）
+                end_month = col_date.month
+                end_year = col_date.year
+                for offset in range(3):
+                    m = end_month - offset
+                    y = end_year
+                    if m <= 0:
+                        m += 12
+                        y -= 1
+                    records.append({
+                        "date": f"{y}-{m:02d}-01",
+                        "revenue_year": y,
+                        "revenue_month": m,
+                        "revenue": quarterly_rev / 3.0,
+                        "stock_id": stock_id
+                    })
+            if records:
+                # 去重：同年月只保留最後一筆
+                seen = {}
+                for rec in records:
+                    key = (rec["revenue_year"], rec["revenue_month"])
+                    seen[key] = rec
+                deduped = list(seen.values())
+                _get_rev_cache()[stock_id] = deduped
+                return deduped
+        except Exception:
+            pass
     return []
 
-@lru_cache(maxsize=1024)
-def fetch_tdcc_holding_shares_cached(stock_id, target_date_str):
-    """獲取集保結算所個股股權分散表並計算變動"""
-    target_date_clean = target_date_str.replace("-", "")
-    url = "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock"
-    }
-    
-    session = requests.Session()
-    try:
-        # GET 1 to get token
-        import urllib3
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        
-        r_get1 = session.get(url, headers=headers, verify=False, timeout=8)
-        if r_get1.status_code != 200:
-            return None
-        soup_get1 = BeautifulSoup(r_get1.text, 'html.parser')
-        token_tag1 = soup_get1.find('input', {'name': 'SYNCHRONIZER_TOKEN'})
-        if not token_tag1:
-            return None
-        token1 = token_tag1.get('value')
-        
-        select_tag = soup_get1.find('select', {'name': 'scaDate'})
-        if not select_tag:
-            return None
-        dates = [opt.get('value') for opt in select_tag.find_all('option')]
-        
-        # Filter dates
-        dates_filtered = [d for d in dates if d <= target_date_clean]
-        if len(dates_filtered) < 2:
-            return None
-            
-        date_t0 = dates_filtered[0]
-        date_t1 = dates_filtered[1]
-        
-        # POST 1
-        payload_t0 = {
-            "SYNCHRONIZER_TOKEN": token1,
-            "SYNCHRONIZER_URI": "/portal/zh/smWeb/qryStock",
-            "method": "submit",
-            "sqlMethod": "StockNo",
-            "stockNo": stock_id,
-            "scaDate": date_t0
-        }
-        r_t0 = session.post(url, data=payload_t0, headers=headers, verify=False, timeout=8)
-        
-        # GET 2
-        r_get2 = session.get(url, headers=headers, verify=False, timeout=8)
-        soup_get2 = BeautifulSoup(r_get2.text, 'html.parser')
-        token_tag2 = soup_get2.find('input', {'name': 'SYNCHRONIZER_TOKEN'})
-        token2 = token_tag2.get('value') if token_tag2 else token1
-        
-        # POST 2
-        payload_t1 = {
-            "SYNCHRONIZER_TOKEN": token2,
-            "SYNCHRONIZER_URI": "/portal/zh/smWeb/qryStock",
-            "method": "submit",
-            "sqlMethod": "StockNo",
-            "stockNo": stock_id,
-            "scaDate": date_t1
-        }
-        r_t1 = session.post(url, data=payload_t1, headers=headers, verify=False, timeout=8)
-        
-        def parse_dist(html):
-            soup = BeautifulSoup(html, 'html.parser')
-            tables = soup.find_all('table')
-            if len(tables) < 2:
-                return None
-            rows = tables[1].find_all('tr')
-            dist = {}
-            for row in rows[1:]:
-                cols = [col.text.strip() for col in row.find_all(['td', 'th'])]
-                if len(cols) >= 5:
-                    try:
-                        dist[cols[0]] = float(cols[4].replace('%', '').replace(',', ''))
-                    except:
-                        pass
-            return dist
-            
-        dist_t0 = parse_dist(r_t0.text)
-        dist_t1 = parse_dist(r_t1.text)
-        if not dist_t0 or not dist_t1:
-            return None
-            
-        # Retail (<100張) = levels 1 to 9
-        retail_t0 = sum(dist_t0.get(str(i), 0.0) for i in range(1, 10))
-        retail_t1 = sum(dist_t1.get(str(i), 0.0) for i in range(1, 10))
-        
-        # Big 400 (>400張) = levels 12 to 15
-        big_400_t0 = sum(dist_t0.get(str(i), 0.0) for i in range(12, 16))
-        big_400_t1 = sum(dist_t1.get(str(i), 0.0) for i in range(12, 16))
-        
-        # Big 1000 (>1000張) = level 15
-        big_1000_t0 = dist_t0.get("15", 0.0)
-        big_1000_t1 = dist_t1.get("15", 0.0)
-        
-        return {
-            "date_t0": date_t0,
-            "date_t1": date_t1,
-            "retail_t0": retail_t0,
-            "retail_change": retail_t0 - retail_t1,
-            "big_400_t0": big_400_t0,
-            "big_400_change": big_400_t0 - big_400_t1,
-            "big_1000_t0": big_1000_t0,
-            "big_1000_change": big_1000_t0 - big_1000_t1
-        }
-    except:
-        pass
-    return None
-
-
-
-@st.cache_data(ttl=1800) # 盈餘意外預估，快取30分鐘
-def fetch_yfinance_surprise(ticker):
-    """獲取 yfinance 盈餘意外與分析師預估數據"""
-    try:
-        tick = yf.Ticker(ticker)
-        ed = tick.get_earnings_dates(limit=5)
-        if ed is not None and not ed.empty:
-            return ed.to_json(date_format='iso')
-    except Exception:
-        pass
-    return None
 
 # --- 🧪 基本面運算核心邏輯 (支持歷史回溯時間軸過濾) ---
 
@@ -723,8 +608,6 @@ def process_earnings_surprise(surprise_json, backtest_date):
     except Exception:
         pass
     return None
-
-
 
 # --- 🚀 多線程併發加載基本面數據 ---
 
@@ -1250,12 +1133,6 @@ if submit_btn or st.session_state.first_run:
                         fund_data = FUNDAMENTAL_RESULTS.get(ticker, {})
                         c33_display = fund_data.get("c33", {}).get("display", "N/A")
                         mrev_display = fund_data.get("mrev", {}).get("display", "N/A")
-                        surprise_data = fund_data.get("surprise")
-                        if surprise_data:
-                            surp_val = surprise_data["surprise"]
-                            surprise_display = f"+{surp_val:.1f}%" if surp_val > 0 else f"{surp_val:.1f}%"
-                        else:
-                            surprise_display = "N/A"
 
                         integrated_results.append({
                             "ticker": ticker, # 隱藏欄位
@@ -1266,9 +1143,8 @@ if submit_btn or st.session_state.first_run:
                             "動能狀態判定": vcp_status_final,
                             "🧪 Code 33": c33_display,
                             "🚀 月營收爆發": mrev_display,
-                            "💥 盈餘意外": surprise_display,
                             "50MA乖離率(%)": bias_50,
-                                                         "IBD式 絕對分數": ibd, "對比 0050 超額強度": rel_strength_0050,
+                            "IBD式 絕對分數": ibd, "對比 0050 超額強度": rel_strength_0050,
                             "短線抗跌韌性分數": resilience, "逆風勝率": f"{outperform} / {total_panic_days} 天",
                             "逆風上漲天數": f"{np.sum(s_ret.reindex(panic_dates_list) > 0)} 天",
                             perf_col_key: future_return
@@ -1279,23 +1155,22 @@ if submit_btn or st.session_state.first_run:
                     cols = df_final.columns.tolist()
                     perf_col_name = f"後續{holding_days}日實際報酬(%)"
                     
-                    # 重新安排基本面欄位順序至顯眼處
-                    fundamental_cols = ["🧪 Code 33", "🚀 月營收爆發", "💥 盈餘意外"]
+                    fundamental_cols = ["🧪 Code 33", "🚀 月營收爆發"]
+                    
                     for f_col in fundamental_cols:
                         if f_col in cols:
                             cols.remove(f_col)
-                    
-                    # 插入至股票名稱後面
                     idx_to_insert = cols.index("股票名稱") + 1
                     for f_col in reversed(fundamental_cols):
                         cols.insert(idx_to_insert, f_col)
-                    
+                        
                     if "50MA乖離率(%)" in cols:
                         cols.remove("50MA乖離率(%)")
                         cols.append("50MA乖離率(%)")
                     if perf_col_name in cols:
                         cols.remove(perf_col_name)
                         if is_backtesting:
+                            # 插入在基本面欄位後面
                             cols.insert(cols.index("股票名稱") + 1 + len(fundamental_cols), perf_col_name)
                         else:
                             cols.append(perf_col_name)
@@ -1339,9 +1214,8 @@ if submit_btn or st.session_state.first_run:
                         "50MA乖離率(%)": st.column_config.NumberColumn("50MA乖離率", format="%.2f%%"),
                         "IBD式 絕對分數": st.column_config.NumberColumn("IBD式 絕對強度", format="%.1f"),
                         "短線抗跌韌性分數": st.column_config.ProgressColumn("抗跌得分", min_value=0, max_value=100, format="%.0f分"),
-                        "🧪 Code 33": st.column_config.TextColumn("🧪 Code 33", help="連續三季的 EPS YoY、營收 YoY、淨利率 是否同步呈現遞增趨勢"),
-                        "🚀 月營收爆發": st.column_config.TextColumn("🚀 月營收爆發", help="最新月營收創 12 個月新高，或營收 YoY 連續兩月加速"),
-                        "💥 盈餘意外": st.column_config.TextColumn("💥 盈餘意外", help="實際公佈每股盈餘與分析師預估值之意外比例 (%)")
+                        "🧪 Code 33": st.column_config.TextColumn("🧪 Code 33", width=150, help="連續三季的 EPS YoY、營收 YoY、淨利率是否同步呈現遞增趨勢。✅=三加速確認"),
+                        "🚀 月營收爆發": st.column_config.TextColumn("🚀 月營收爆發", width=150, help="月營收創12M新高 或 YoY連2月加速")
                     }
                     if is_backtesting:
                         column_config_dict[perf_col_name] = st.column_config.NumberColumn(f"🎯 後續{holding_days}日報酬", format="%.2f%%")
@@ -1353,7 +1227,28 @@ if submit_btn or st.session_state.first_run:
                     
                     st.divider()
                     st.subheader("🏁 Mark Minervini 流派：雙軌交叉戰略部署")
-                    st.markdown(f"<span style='color: #666666; font-size: 0.85em; display: block; margin-top: -10px; margin-bottom: 10px;'>💡 註：個股資訊已全面徽章化（未達標或無資料之基本面項目將不予顯示）。藍/紅徽章代表 50MA 乖離率，綠/紅徽章代表 {holding_days} 日回測報酬。<b>基本面標籤（懸停可檢視詳細軌跡）：</b>🧪 Code 33 (盈餘/營收/利潤三加速) | 🚀 月營收 (創12M新高或YoY連2月加速) | 💥 盈餘意外 (實際優於預期)</span>", unsafe_allow_html=True)
+                    
+                    # 說明文字：依開關狀態而異
+                    desc_lines = []
+                    if show_fundamental:
+                        desc_lines.append("🧪 <b>Code 33</b> = 連3季 EPS/營收/淨利率三加速&nbsp;｜&nbsp;🚀 <b>月營收</b> = 創12M新高 或 YoY連2月加速")
+                        desc_lines.append(
+                            "🔬 <b>馬克的 SEPA 基本面心法備註</b>：<br>"
+                            "&nbsp;&nbsp;• <b>「技術面決定進場時機，基本面決定漲幅高度」</b>：馬克指出，90% 的超級飆股在發動主升段前，其盈餘與營收均呈現『加速增長』的特徵。<br>"
+                            "&nbsp;&nbsp;• <b>Code 33 三加速</b>：代表連續 3 季 EPS YoY、營收 YoY、淨利率同步攀升，是機構資金（Institutional Money）鎖定吃貨的最強護城河。<br>"
+                            "&nbsp;&nbsp;• <b>月營收爆發</b>：在季報公佈前，單月營收創 12 個月新高或 YoY 連續加速，是領先確認終端銷售動能爆發的即時信號。"
+                        )
+                        
+                    if desc_lines:
+                        st.markdown(
+                            "<div style='background-color:#f6ffed; border:1px solid #b7eb8f; padding:12px; border-radius:8px; margin-bottom:15px;'>"
+                            "<span style='color:#389e0d; font-size:0.86em; line-height:1.6;'>"
+                            "💡 <b>指標徽章說明與馬克心法備註</b>（懸停可檢視詳細數據軌跡）：<br><br>" + "<br><br>".join(desc_lines) +
+                            "</span></div>",
+                            unsafe_allow_html=True
+                        )
+                    else:
+                        st.caption(f"💡 括號內為 50MA 乖離率(%)。右側標註為【後續 {holding_days} 日回測實際報酬率】。可在左側開啟「🔬 顯示基本面分析標籤」查看更多維度資訊。")
                     
                     true_leaders = df_final[(df_final["對比 0050 超額強度"] > 0) & (df_final["短線抗跌韌性分數"] >= dynamic_threshold)]
                     momentum_only = df_final[(df_final["對比 0050 超額強度"] > 0) & (df_final["短線抗跌韌性分數"] < dynamic_threshold)]
@@ -1365,112 +1260,92 @@ if submit_btn or st.session_state.first_run:
                             return "無"
                         lines = []
                         for _, row in df.iterrows():
-                            # 1. 50MA 乖離率徽章
+                            # 50MA 乖離率：括號格式，高乖離染紅
                             bias_val = row['50MA乖離率(%)']
                             if bias_val >= 30.0:
-                                bias_badge = f'<span style="background-color: #fff1f0; color: #cf1322; border: 1px solid #ffa39e; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; display: inline-block;">50MA: {bias_val:.1f}%</span>'
+                                bias_str = f"(<span style='color:#cf1322;font-weight:bold;'>{bias_val:.1f}%</span>)"
                             else:
-                                bias_badge = f'<span style="background-color: #e6f7ff; color: #0050b3; border: 1px solid #91d5ff; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; display: inline-block;">50MA: {bias_val:.1f}%</span>'
+                                bias_str = f"({bias_val:.1f}%)"
 
-                            # 2. 處置股徽章 (Inline 顯示日期解決手機無懸停問題)
+                            # 處置股：inline 文字警示（懸停顯示起迄時間）
                             disp_info = DISPOSITION_MAP.get(row['股票代號'])
                             if disp_info:
                                 period_text = disp_info['period'] if disp_info.get('period') else ""
                                 disp_str = (
-                                    f'<span style="background-color: #fff1f0; color: #e74c3c; border: 1px solid #ffbaba; '
-                                    f'padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: 600; '
-                                    f'display: inline-block;" title="處置起迄時間: {period_text}">🚨 處置中({period_text})</span>'
+                                    f" <span style='color:#e74c3c;font-weight:600;'"
+                                    f" title='處置起迄：{period_text}'>🚨 處置中</span>"
                                 )
                             else:
                                 disp_str = ""
 
-                            # 基本面 HTML 標籤
-                            ticker = row["ticker"]
-                            fund = FUNDAMENTAL_RESULTS.get(ticker, {})
-                            fund_badges_list = []
-                            details_lines = []
-
-                            # 🧪 Code 33 Badge
-                            c33 = fund.get("c33", {})
-                            c33_active = c33.get("active", False)
-                            c33_traj = c33.get("trajectory", "").replace('"', '&quot;')
-                            if c33_active:
-                                fund_badges_list.append(f'<span style="background-color: #e6f7ff; color: #0050b3; border: 1px solid #91d5ff; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; display: inline-block;">🧪 Code 33</span>')
-                                if show_fundamental:
-                                    details_lines.append(f"🧪 <b>Code 33 加速數據：</b><br>" + c33.get("trajectory", "").replace("\n", "<br>"))
-
-                            # 🚀 Monthly Revenue Badge
-                            mrev = fund.get("mrev", {})
-                            mrev_12h = mrev.get("is_12m_high", False)
-                            mrev_acc = mrev.get("is_accelerating", False)
-                            mrev_traj = mrev.get("trajectory", "").replace('"', '&quot;')
-                            if mrev_12h and mrev_acc:
-                                fund_badges_list.append(f'<span style="background-color: #f6ffed; color: #389e0d; border: 1px solid #b7eb8f; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; display: inline-block;">🚀 月營收爆發</span>')
-                            elif mrev_12h:
-                                fund_badges_list.append(f'<span style="background-color: #f6ffed; color: #389e0d; border: 1px solid #b7eb8f; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; display: inline-block;">🚀 營收新高</span>')
-                            elif mrev_acc:
-                                fund_badges_list.append(f'<span style="background-color: #f6ffed; color: #389e0d; border: 1px solid #b7eb8f; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; display: inline-block;">🚀 營收YoY加速</span>')
-
-                            if show_fundamental and (mrev_12h or mrev_acc):
-                                details_lines.append(f"🚀 <b>月營收動能軌跡：</b><br>" + mrev.get("trajectory", "").replace("\n", "<br>"))
-
-                            # 💥 Earnings Surprise Badge
-                            surprise = fund.get("surprise")
-                            if surprise:
-                                val = surprise["surprise"]
-                                est = surprise["estimate"]
-                                act = surprise["actual"]
-                                dt = surprise["date"]
-                                title_str = f"預估 EPS: {est:.2f}\\n實際 EPS: {act:.2f}\\n公佈日期: {dt}".replace('"', '&quot;')
-                                if val > 0:
-                                    fund_badges_list.append(f'<span style="background-color: #fff7e6; color: #d46b08; border: 1px solid #ffd591; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; display: inline-block;">💥 意外 +{val:.1f}%</span>')
-                                else:
-                                    fund_badges_list.append(f'<span style="background-color: #fff0f6; color: #c41d7f; border: 1px solid #ffadd2; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; display: inline-block;">💥 意外 {val:.1f}%</span>')
-
-                                if show_fundamental:
-                                    details_lines.append(f"💥 <b>EPS 意外數據：</b><br>" + f"預估 EPS: {est:.2f} ｜ 實際 EPS: {act:.2f} ｜ 公佈日期: {dt}")
-
-                            fund_badges = " ".join(fund_badges_list)
-
-                            # 3. 動能狀態徽章
-                            status_str = row['動能狀態判定']
-                            status_badge = f'<span style="background-color: #f5f5f5; color: #666666; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; display: inline-block;">{status_str}</span>'
-
-                            # 4. 回測績效徽章
+                            # 回測績效：inline 彩色箭頭
                             if show_perf:
                                 ret_val = row[perf_col_name]
                                 if ret_val > 0:
-                                    perf_badge = f'<span style="background-color: #f6ffed; color: #389e0d; border: 1px solid #b7eb8f; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; display: inline-block;">報酬: +{ret_val:.1f}%</span>'
+                                    perf_str = f" <span style='color:#389e0d;font-weight:bold;'>▲ {ret_val:.1f}%</span>"
                                 elif ret_val < 0:
-                                    perf_badge = f'<span style="background-color: #fff1f0; color: #cf1322; border: 1px solid #ffa39e; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; display: inline-block;">報酬: {ret_val:.1f}%</span>'
+                                    perf_str = f" <span style='color:#cf1322;font-weight:bold;'>▼ {ret_val:.1f}%</span>"
                                 else:
-                                    perf_badge = f'<span style="background-color: #f5f5f5; color: #595959; border: 1px solid #d9d9d9; padding: 2px 6px; border-radius: 12px; font-size: 0.82em; font-weight: bold; display: inline-block;">報酬: 0.0%</span>'
+                                    perf_str = f" <span style='color:#888;'>— 0.0%</span>"
                             else:
-                                perf_badge = ""
+                                perf_str = ""
 
-                            # 5. Native HTML 折疊面板
-                            details_block = ""
-                            if show_fundamental and details_lines:
-                                details_content = "<br>".join(details_lines)
-                                details_block = (
-                                    f"<details style='margin: 4px 0 6px 20px; font-size: 0.82em;'>"
-                                    f"<summary style='cursor: pointer; outline: none; color: #8c8c8c; font-size: 0.9em;'>🔬 點擊展開詳細軌跡</summary>"
-                                    f"<div style='padding: 6px 10px; margin-top: 4px; border-left: 2px solid rgba(128,128,128,0.3); line-height: 1.4; color: inherit; background: rgba(128,128,128,0.05); border-radius: 4px;'>{details_content}</div>"
-                                    f"</details>"
-                                )
-
-                            formatted_name = f"{row['趨勢模板']} <b>{row['原始名稱']}</b>"
-
-                            # 用一個獨立的 div 包裹，確保排版整齊，不干擾 markdown
-                            lines.append(
-                                f"<div style='margin-bottom: 12px; line-height: 1.6; font-size: 0.95em;'>"
-                                f"  <div style='display: flex; flex-wrap: wrap; align-items: center; gap: 4px;'>"
-                                f"    <span>• {formatted_name}</span>"
-                                f"    {status_badge} {bias_badge} {disp_str} {fund_badges} {perf_badge}"
-                                f"  </div>"
-                                f"  {details_block}"
-                                f"</div>"
+                            # 主行：經典格式 ✅/❌ 股名 【動能狀態】 (50MA%) 🚨處置中 ▲報酬
+                            status_str = row['動能狀態判定']
+                            main_line = (
+                                f"{row['趨勢模板']} <b>{row['原始名稱']}</b> "
+                                f"【{status_str}】 {bias_str}{disp_str}{perf_str}"
                             )
+                            lines.append(f"* {main_line}")
+
+                            # 子行（依開關狀態輸出基本面與籌碼徽章）
+                            sub_badges_list = []
+                            ticker = row["ticker"]
+                            fund = FUNDAMENTAL_RESULTS.get(ticker, {})
+
+                            if show_fundamental:
+                                # 🧪 Code 33
+                                c33 = fund.get("c33", {})
+                                if c33.get("active", False):
+                                    c33_traj = c33.get("trajectory", "").replace('"', '&quot;').replace("\\n", "&#10;")
+                                    sub_badges_list.append(
+                                        f'<span style="background:#e6f7ff;color:#0050b3;border:1px solid #91d5ff;'
+                                        f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
+                                        f'margin-right:5px;cursor:help;" title="【Code 33】連3季 EPS/營收/淨利率同步加速&#10;{c33_traj}">🧪 Code 33</span>'
+                                    )
+
+                                # 🚀 月營收
+                                mrev = fund.get("mrev", {})
+                                mrev_12h = mrev.get("is_12m_high", False)
+                                mrev_acc = mrev.get("is_accelerating", False)
+                                mrev_traj = mrev.get("trajectory", "").replace('"', '&quot;').replace("\\n", "&#10;")
+                                if mrev_12h and mrev_acc:
+                                    sub_badges_list.append(
+                                        f'<span style="background:#f6ffed;color:#389e0d;border:1px solid #b7eb8f;'
+                                        f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
+                                        f'margin-right:5px;cursor:help;" title="【月營收新高 &amp; YoY加速】&#10;{mrev_traj}">🚀 月營收爆發</span>'
+                                    )
+                                elif mrev_12h:
+                                    sub_badges_list.append(
+                                        f'<span style="background:#f6ffed;color:#389e0d;border:1px solid #b7eb8f;'
+                                        f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
+                                        f'margin-right:5px;cursor:help;" title="【月營收創12M新高】&#10;{mrev_traj}">🚀 營收新高</span>'
+                                    )
+                                elif mrev_acc:
+                                    sub_badges_list.append(
+                                        f'<span style="background:#f6ffed;color:#389e0d;border:1px solid #b7eb8f;'
+                                        f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
+                                        f'margin-right:5px;cursor:help;" title="【YoY連續兩月加速】&#10;{mrev_traj}">🚀 營收YoY加速</span>'
+                                    )
+
+                            # 統一繪製縮排子行
+                            if sub_badges_list:
+                                badge_html = "".join(sub_badges_list)
+                                lines.append(
+                                    f"  <div style='margin:-2px 0 6px 20px;line-height:2;opacity:0.95;'>"
+                                    f"<span style='color:#bbb;font-size:0.8em;margin-right:4px;'>└</span>"
+                                    f"{badge_html}</div>"
+                                )
 
                         return "\n".join(lines)
 
