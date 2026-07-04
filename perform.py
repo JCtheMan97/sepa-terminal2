@@ -1267,13 +1267,13 @@ if submit_btn or st.session_state.first_run:
                             else:
                                 bias_str = f"({bias_val:.1f}%)"
 
-                            # 處置股：inline 文字警示（懸停顯示起迄時間）
+                            # 處置股：inline 文字警示與日期顯示（解決手機無懸停問題）
                             disp_info = DISPOSITION_MAP.get(row['股票代號'])
                             if disp_info:
                                 period_text = disp_info['period'] if disp_info.get('period') else ""
                                 disp_str = (
                                     f" <span style='color:#e74c3c;font-weight:600;'"
-                                    f" title='處置起迄：{period_text}'>🚨 處置中</span>"
+                                    f" title='處置起迄：{period_text}'>🚨 處置中({period_text})</span>"
                                 )
                             else:
                                 disp_str = ""
