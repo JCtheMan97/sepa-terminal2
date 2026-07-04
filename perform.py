@@ -1267,13 +1267,13 @@ if submit_btn or st.session_state.first_run:
                             else:
                                 bias_str = f"({bias_val:.1f}%)"
 
-                            # 處置股：inline 文字警示（懸停顯示起迄時間）
+                            # 處置股：直接 inline 顯示起迄日期（手機無懸停，不用 title）
                             disp_info = DISPOSITION_MAP.get(row['股票代號'])
                             if disp_info:
                                 period_text = disp_info['period'] if disp_info.get('period') else ""
                                 disp_str = (
-                                    f" <span style='color:#e74c3c;font-weight:600;'"
-                                    f" title='處置起迄：{period_text}'>🚨 處置中</span>"
+                                    f" <span style='color:#e74c3c;font-weight:600;'>"
+                                    f"🚨 處置中({period_text})</span>"
                                 )
                             else:
                                 disp_str = ""
@@ -1296,10 +1296,10 @@ if submit_btn or st.session_state.first_run:
                                 f"{row['趨勢模板']} <b>{row['原始名稱']}</b> "
                                 f"【{status_str}】 {bias_str}{disp_str}{perf_str}"
                             )
-                            lines.append(f"* {main_line}")
 
-                            # 子行（依開關狀態輸出基本面與籌碼徽章）
+                            # 子行（依開關狀態輸出基本面徽章 + 折疊詳細軌跡）
                             sub_badges_list = []
+                            details_lines = []
                             ticker = row["ticker"]
                             fund = FUNDAMENTAL_RESULTS.get(ticker, {})
 
@@ -1307,45 +1307,63 @@ if submit_btn or st.session_state.first_run:
                                 # 🧪 Code 33
                                 c33 = fund.get("c33", {})
                                 if c33.get("active", False):
-                                    c33_traj = c33.get("trajectory", "").replace('"', '&quot;').replace("\\n", "&#10;")
                                     sub_badges_list.append(
                                         f'<span style="background:#e6f7ff;color:#0050b3;border:1px solid #91d5ff;'
                                         f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
-                                        f'margin-right:5px;cursor:help;" title="【Code 33】連3季 EPS/營收/淨利率同步加速&#10;{c33_traj}">🧪 Code 33</span>'
+                                        f'margin-right:5px;">🧪 Code 33</span>'
                                     )
+                                    details_lines.append(f"🧪 <b>Code 33 加速數據：</b><br>" + c33.get("trajectory", "").replace("\\n", "<br>"))
 
                                 # 🚀 月營收
                                 mrev = fund.get("mrev", {})
                                 mrev_12h = mrev.get("is_12m_high", False)
                                 mrev_acc = mrev.get("is_accelerating", False)
-                                mrev_traj = mrev.get("trajectory", "").replace('"', '&quot;').replace("\\n", "&#10;")
                                 if mrev_12h and mrev_acc:
                                     sub_badges_list.append(
                                         f'<span style="background:#f6ffed;color:#389e0d;border:1px solid #b7eb8f;'
                                         f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
-                                        f'margin-right:5px;cursor:help;" title="【月營收新高 &amp; YoY加速】&#10;{mrev_traj}">🚀 月營收爆發</span>'
+                                        f'margin-right:5px;">🚀 月營收爆發</span>'
                                     )
                                 elif mrev_12h:
                                     sub_badges_list.append(
                                         f'<span style="background:#f6ffed;color:#389e0d;border:1px solid #b7eb8f;'
                                         f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
-                                        f'margin-right:5px;cursor:help;" title="【月營收創12M新高】&#10;{mrev_traj}">🚀 營收新高</span>'
+                                        f'margin-right:5px;">🚀 營收新高</span>'
                                     )
                                 elif mrev_acc:
                                     sub_badges_list.append(
                                         f'<span style="background:#f6ffed;color:#389e0d;border:1px solid #b7eb8f;'
                                         f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
-                                        f'margin-right:5px;cursor:help;" title="【YoY連續兩月加速】&#10;{mrev_traj}">🚀 營收YoY加速</span>'
+                                        f'margin-right:5px;">🚀 營收YoY加速</span>'
                                     )
+                                if mrev_12h or mrev_acc:
+                                    details_lines.append(f"🚀 <b>月營收動能軌跡：</b><br>" + mrev.get("trajectory", "").replace("\\n", "<br>"))
 
-                            # 統一繪製縮排子行
+                            # 用 div 包裹主行，避免 markdown * 與 HTML 混排錯位
+                            item_html = f"<div style='margin-bottom:10px;line-height:1.6;font-size:0.95em;'>"
+                            item_html += f"<div>• {main_line}</div>"
+
+                            # 徽章子行
                             if sub_badges_list:
                                 badge_html = "".join(sub_badges_list)
-                                lines.append(
-                                    f"  <div style='margin:-2px 0 6px 20px;line-height:2;opacity:0.95;'>"
+                                item_html += (
+                                    f"<div style='margin:2px 0 0 20px;line-height:2;opacity:0.95;'>"
                                     f"<span style='color:#bbb;font-size:0.8em;margin-right:4px;'>└</span>"
                                     f"{badge_html}</div>"
                                 )
+
+                            # 折疊面板：點擊展開詳細軌跡（取代 title 懸停，手機友善）
+                            if show_fundamental and details_lines:
+                                details_content = "<br>".join(details_lines)
+                                item_html += (
+                                    f"<details style='margin:4px 0 2px 20px;font-size:0.82em;'>"
+                                    f"<summary style='cursor:pointer;outline:none;color:#8c8c8c;font-size:0.9em;'>🔬 點擊展開詳細軌跡</summary>"
+                                    f"<div style='padding:6px 10px;margin-top:4px;border-left:2px solid rgba(128,128,128,0.3);line-height:1.4;color:inherit;background:rgba(128,128,128,0.05);border-radius:4px;'>{details_content}</div>"
+                                    f"</details>"
+                                )
+
+                            item_html += "</div>"
+                            lines.append(item_html)
 
                         return "\n".join(lines)
 
