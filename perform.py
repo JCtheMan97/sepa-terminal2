@@ -14,6 +14,89 @@ from bs4 import BeautifulSoup
 # 1. 網頁初始設定
 st.set_page_config(page_title="🏆 SEPA 雙軌強勢股終端機", layout="wide")
 
+# 🌟 全局視覺風格美化 (極光暗黑 & 玻璃擬態)
+st.markdown("""
+<style>
+    /* 引入現代字體 */
+    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=Noto+Sans+TC:wght@300;400;600;700&display=swap');
+    
+    html, body, [data-testid="stAppViewContainer"] {
+        font-family: 'Outfit', 'Noto Sans TC', sans-serif;
+    }
+    
+    /* 側邊欄優化 */
+    [data-testid="stSidebar"] {
+        background-color: #0e1117 !important;
+        border-right: 1px solid #1f2937 !important;
+    }
+    .sidebar-section {
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 12px;
+        padding: 15px;
+        margin-bottom: 15px;
+    }
+    
+    /* 玻璃擬態象限卡片 (Glassmorphism Quadrant Cards) */
+    .quad-card {
+        background: rgba(22, 27, 34, 0.45);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        border-radius: 14px;
+        padding: 20px;
+        margin-bottom: 25px;
+        box-shadow: 0 4px 30px rgba(0, 0, 0, 0.4);
+        transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.25s ease;
+    }
+    .quad-card:hover {
+        transform: translateY(-3px);
+    }
+    
+    /* 象限顏色主題與發光邊框 */
+    .quad-leader {
+        border: 1px solid rgba(52, 211, 153, 0.25);
+    }
+    .quad-leader:hover {
+        border-color: rgba(52, 211, 153, 0.6);
+        box-shadow: 0 0 15px rgba(52, 211, 153, 0.15);
+    }
+    
+    .quad-momentum {
+        border: 1px solid rgba(34, 211, 238, 0.25);
+    }
+    .quad-momentum:hover {
+        border-color: rgba(34, 211, 238, 0.6);
+        box-shadow: 0 0 15px rgba(34, 211, 238, 0.15);
+    }
+    
+    .quad-defensive {
+        border: 1px solid rgba(251, 191, 36, 0.25);
+    }
+    .quad-defensive:hover {
+        border-color: rgba(251, 191, 36, 0.6);
+        box-shadow: 0 0 15px rgba(251, 191, 36, 0.15);
+    }
+    
+    .quad-laggard {
+        border: 1px solid rgba(248, 113, 113, 0.15);
+    }
+    .quad-laggard:hover {
+        border-color: rgba(248, 113, 113, 0.4);
+        box-shadow: 0 0 15px rgba(248, 113, 113, 0.08);
+    }
+    
+    /* 標題樣式 */
+    .quad-title {
+        font-size: 1.18em;
+        font-weight: 700;
+        margin-bottom: 12px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 # 2. 自動載入與動態初始化後台字典 (相容 UTF-8-sig)
 @st.cache_data
 def load_stock_dict():
@@ -608,52 +691,6 @@ def process_earnings_surprise(surprise_json, backtest_date):
         pass
     return None
 
-# --- 🐳 籌碼面運算核心邏輯 ---
-
-def process_chip_flow(inst_raw, backtest_date_str):
-    """
-    計算外資與投信近5日累計買賣超張數
-    """
-    default_res = {"foreign_5d": 0.0, "trust_5d": 0.0, "dealer_5d": 0.0, "total_5d": 0.0}
-    if not inst_raw:
-        return default_res
-    try:
-        df = pd.DataFrame(inst_raw)
-        if df.empty:
-            return default_res
-            
-        # 僅保留基準日之前的資料
-        df = df[df["date"] <= backtest_date_str]
-        if df.empty:
-            return default_res
-            
-        df["net_buy"] = (df["buy"] - df["sell"]) / 1000.0  # 換算為張數
-        
-        df_pivot = df.pivot(index="date", columns="name", values="net_buy").fillna(0.0)
-        df_pivot = df_pivot.sort_index()
-        
-        # 取得最後 5 個交易日
-        last_5 = df_pivot.tail(5)
-        
-        foreign_5d = float(last_5["Foreign_Investor"].sum()) if "Foreign_Investor" in last_5.columns else 0.0
-        trust_5d = float(last_5["Investment_Trust"].sum()) if "Investment_Trust" in last_5.columns else 0.0
-        
-        d_self = last_5["Dealer_self"].sum() if "Dealer_self" in last_5.columns else 0.0
-        d_hedge = last_5["Dealer_Hedging"].sum() if "Dealer_Hedging" in last_5.columns else 0.0
-        dealer_5d = float(d_self + d_hedge)
-        
-        total_5d = foreign_5d + trust_5d + dealer_5d
-        
-        return {
-            "foreign_5d": foreign_5d,
-            "trust_5d": trust_5d,
-            "dealer_5d": dealer_5d,
-            "total_5d": total_5d
-        }
-    except Exception:
-        pass
-    return default_res
-
 # --- 🚀 多線程併發加載基本面數據 ---
 
 def get_single_stock_fundamentals(args):
@@ -705,23 +742,26 @@ with st.expander("📖 閱讀 SEPA 系統核心心法 (Trade Like a Stock Market
 with st.sidebar.form("sepa_integrated_form"):
     st.header("⚙️ 雙軌指標參數設定")
     
+    st.markdown('<div class="sidebar-section"><b>📁 股票池設定</b>', unsafe_allow_html=True)
     default_pool = (
         "2337.TW,旺宏\n3028.TW,增你強\n3550.TW,聯穎\n6187.TWO,萬潤\n3037.TW,欣興\n3017.TW,奇鋐\n"
         "8086.TWO,宏捷科\n4749.TWO,新應材\n3680.TWO,家登\n8021.TW,尖點\n3481.TW,群創\n"
         "8438.TW,昶昕\n3691.TWO,碩禾\n2423.TW,固緯\n8147.TWO,正淩\n8028.TW,昇陽半導體\n6716.TWO,應廣\n2428.TW,興勤\n5284.TW,JPP-KY\n"
         "2493.TW,揚博\n3023.TW,信邦\n6672.TW,騰輝電子\n3044.TW,健鼎\n6134.TWO,萬旭\n2413.TW,環科\n3577.TWO,泓格\n3305.TW,昇貿"
     )
-    stock_input = st.text_area("股票清單 (支援複製貼上！系統會自動過濾國籍、財報等非代號雜訊)", value=default_pool, height=300)
+    stock_input = st.text_area("股票清單 (支援複製貼上！自動淨化代號)", value=default_pool, height=220)
+    st.markdown('</div>', unsafe_allow_html=True)
     
-    st.subheader("【短線逆風照妖鏡參數】")
+    st.markdown('<div class="sidebar-section"><b>🔍 短線逆風照妖鏡參數</b>', unsafe_allow_html=True)
     lookback_days = st.number_input("自訂照妖鏡觀察天數", min_value=5, max_value=365, value=45, step=1)
     market_threshold = st.slider("大盤恐慌日定義 (單日跌幅 %)", min_value=0.5, max_value=2.5, value=1.0, step=0.1)
-    
     show_fundamental = st.checkbox("🔬 顯示基本面分析標籤", value=False, help="開啟後，下方象限列表個股名稱下方將顯示 Code 33 與 月營收之詳細徽章")
+    st.markdown('</div>', unsafe_allow_html=True)
     
-    st.subheader("【🕒 歷史回溯與績效回測】")
+    st.markdown('<div class="sidebar-section"><b>🕒 歷史回溯與績效回測</b>', unsafe_allow_html=True)
     backtest_date = st.date_input("選擇回溯基準日 (以此日視為當時的今天)", value=datetime.today())
     holding_days = st.number_input("回溯後預計持有天數 (交易日)", min_value=1, max_value=120, value=20, step=1)
+    st.markdown('</div>', unsafe_allow_html=True)
     
     is_backtesting = backtest_date < datetime.today().date()
     submit_btn = st.form_submit_button("🚀 執行雙軌交叉選股分析")
@@ -1394,11 +1434,149 @@ if submit_btn or st.session_state.first_run:
 
                         return "\n".join(lines)
 
+                    # --- 📊 繪製雙軌交叉二維分佈圖 (Plotly) ---
+                    try:
+                        import plotly.express as px
+                        
+                        df_plot = df_final.copy()
+                        quadrants_label = []
+                        for _, row in df_plot.iterrows():
+                            y_val = row["對比 0050 超額強度"]
+                            x_val = row["短線抗跌韌性分數"]
+                            if y_val > 0 and x_val >= dynamic_threshold:
+                                quadrants_label.append("👑 第一象限：逆風真龍頭")
+                            elif y_val > 0 and x_val < dynamic_threshold:
+                                quadrants_label.append("🚀 第二象限：高 Beta 攻擊兵")
+                            elif y_val <= 0 and x_val >= dynamic_threshold:
+                                quadrants_label.append("🛡️ 第三象限：資金避風港")
+                            else:
+                                quadrants_label.append("🚨 第四象限：無情剔除名單")
+                                
+                        df_plot["所屬象限"] = quadrants_label
+                        
+                        fig = px.scatter(
+                            df_plot,
+                            x="短線抗跌韌性分數",
+                            y="對比 0050 超額強度",
+                            text="原始名稱",
+                            color="所屬象限",
+                            color_discrete_map={
+                                "👑 第一象限：逆風真龍頭": "#10b981",
+                                "🚀 第二象限：高 Beta 攻擊兵": "#06b6d4",
+                                "🛡️ 第三象限：資金避風港": "#f59e0b",
+                                "🚨 第四象限：無情剔除名單": "#ef4444"
+                            },
+                            hover_data={
+                                "ticker": True,
+                                "原始名稱": True,
+                                "短線抗跌韌性分數": ":.1f",
+                                "對比 0050 超額強度": ":.1f",
+                                "50MA乖離率(%)": ":.2f"
+                            }
+                        )
+                        
+                        # 調整標記外觀
+                        fig.update_traces(
+                            marker=dict(size=12, opacity=0.85, line=dict(width=1, color="rgba(255,255,255,0.4)")),
+                            textposition="top center"
+                        )
+                        
+                        # 加上象限十字虛線
+                        min_x = df_plot["短線抗跌韌性分數"].min() if not df_plot.empty else 0
+                        max_x = df_plot["短線抗跌韌性分數"].max() if not df_plot.empty else 100
+                        min_y = df_plot["對比 0050 超額強度"].min() if not df_plot.empty else -10
+                        max_y = df_plot["對比 0050 超額強度"].max() if not df_plot.empty else 10
+                        
+                        fig.add_shape(
+                            type="line",
+                            x0=dynamic_threshold, y0=min_y - 2,
+                            x1=dynamic_threshold, y1=max_y + 2,
+                            line=dict(color="rgba(255,255,255,0.2)", width=1.5, dash="dash")
+                        )
+                        fig.add_shape(
+                            type="line",
+                            x0=min_x - 5, y0=0,
+                            x1=max_x + 5, y1=0,
+                            line=dict(color="rgba(255,255,255,0.2)", width=1.5, dash="dash")
+                        )
+                        
+                        fig.update_layout(
+                            template="plotly_dark",
+                            plot_bgcolor="#0e1117",
+                            paper_bgcolor="#0e1117",
+                            xaxis=dict(
+                                title="短線抗跌韌性分數 (%)",
+                                gridcolor="rgba(255,255,255,0.05)",
+                                zeroline=False
+                            ),
+                            yaxis=dict(
+                                title="對比 0050 超額強度分數",
+                                gridcolor="rgba(255,255,255,0.05)",
+                                zeroline=False
+                            ),
+                            legend=dict(
+                                bgcolor="rgba(10,10,10,0.6)",
+                                bordercolor="rgba(255,255,255,0.1)",
+                                borderwidth=1
+                            ),
+                            margin=dict(l=10, r=10, t=10, b=10),
+                            height=480
+                        )
+                        
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as pe:
+                        st.caption(f"ℹ️ 散佈圖載入暫緩: {pe}")
+
+                    # 經典的 2x2 格局佈局
                     c1, c2 = st.columns(2)
-                    c1.success(f"### 👑 第一象限：逆風真龍頭 ({len(true_leaders)} 檔)"); c1.markdown(format_stocks(true_leaders, is_backtesting), unsafe_allow_html=True); c1.caption("👉 戰略部署：長線動能擊敗大盤，且短線抗跌表現達到當前動態合格線以上。隨時注意 VCP 出量突破。")
-                    c1.info(f"### 🚀 第二象限：高 Beta 攻擊兵 ({len(momentum_only)} 檔)"); c1.markdown(format_stocks(momentum_only, is_backtesting), unsafe_allow_html=True); c1.caption("👉 戰略部署：長線極強，但修正波動高於大盤. 一旦大盤止穩，這群股票往往是右側出量追擊的首選。")
-                    c2.warning(f"### 🛡️ 第三象限：資金避風港 ({len(defensive_only)} 檔)"); c2.markdown(format_stocks(defensive_only, is_backtesting), unsafe_allow_html=True); c2.caption("👉 戰略部署：短線極度抗跌，長線動能尚未完全追上。若有打打底完成標的，高抗跌意味主力在低檔死守，值得關注！")
-                    c2.error(f"### 🚨 第四象限：無情剔除名單 ({len(laggards)} 檔)"); c2.markdown(format_stocks(laggards, is_backtesting), unsafe_allow_html=True); c2.caption("👉 戰略部署：長短線皆跑輸大盤，在馬克系統中屬於弱勢標的，建議審慎評估資金配置與汰弱留強。")
+                    
+                    # 👑 第一象限
+                    with c1:
+                        st.markdown(f"""
+                        <div class="quad-card quad-leader">
+                            <div class="quad-title" style="color: #34d399;">👑 第一象限：逆風真龍頭 ({len(true_leaders)} 檔)</div>
+                            <div style="margin-bottom: 12px; color: #f1f5f9;">{format_stocks(true_leaders, is_backtesting)}</div>
+                            <div style="font-size: 0.82em; color: #94a3b8; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 8px;">
+                                👉 <strong>戰略部署</strong>：長線動能擊敗大盤，且短線抗跌表現達到當前動態合格線以上。隨時注意 VCP 出量突破。
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                    # 🚀 第二象限
+                    with c1:
+                        st.markdown(f"""
+                        <div class="quad-card quad-momentum">
+                            <div class="quad-title" style="color: #22d3ee;">🚀 第二象限：高 Beta 攻擊兵 ({len(momentum_only)} 檔)</div>
+                            <div style="margin-bottom: 12px; color: #f1f5f9;">{format_stocks(momentum_only, is_backtesting)}</div>
+                            <div style="font-size: 0.82em; color: #94a3b8; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 8px;">
+                                👉 <strong>戰略部署</strong>：長線極強，但修正波動高於大盤。一旦大盤止穩，這群股票往往是右側出量追擊的首選。
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                    # 🛡️ 第三象限
+                    with c2:
+                        st.markdown(f"""
+                        <div class="quad-card quad-defensive">
+                            <div class="quad-title" style="color: #fbbf24;">🛡️ 第三象限：資金避風港 ({len(defensive_only)} 檔)</div>
+                            <div style="margin-bottom: 12px; color: #f1f5f9;">{format_stocks(defensive_only, is_backtesting)}</div>
+                            <div style="font-size: 0.82em; color: #94a3b8; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 8px;">
+                                👉 <strong>戰略部署</strong>：短線極度抗跌，長線動能尚未完全追上。若打底完成，高抗跌意味主力在低檔死守，值得關注！
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                    # 🚨 第四象限
+                    with c2:
+                        st.markdown(f"""
+                        <div class="quad-card quad-laggard">
+                            <div class="quad-title" style="color: #f87171;">🚨 第四象限：無情剔除名單 ({len(laggards)} 檔)</div>
+                            <div style="margin-bottom: 12px; color: #cbd5e1;">{format_stocks(laggards, is_backtesting)}</div>
+                            <div style="font-size: 0.82em; color: #94a3b8; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 8px;">
+                                👉 <strong>戰略部署</strong>：長短線皆跑輸大盤，在馬克系統中屬於弱勢標的，建議審慎評估資金配置與汰弱留強。
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
                     
         except Exception as e:
             st.error(f"數據錯誤: {e}")
