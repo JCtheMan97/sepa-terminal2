@@ -1214,8 +1214,8 @@ if submit_btn or st.session_state.first_run:
                         "50MA乖離率(%)": st.column_config.NumberColumn("50MA乖離率", format="%.2f%%"),
                         "IBD式 絕對分數": st.column_config.NumberColumn("IBD式 絕對強度", format="%.1f"),
                         "短線抗跌韌性分數": st.column_config.ProgressColumn("抗跌得分", min_value=0, max_value=100, format="%.0f分"),
-                        "🧪 Code 33": st.column_config.TextColumn("🧪 Code 33", width=220, help="連續三季的 EPS YoY、營收 YoY、淨利率是否同步呈現遞增趨勢。✅=三加速確認"),
-                        "🚀 月營收爆發": st.column_config.TextColumn("🚀 月營收爆發", width=220, help="月營收創12M新高 或 YoY連2月加速")
+                        "🧪 Code 33": st.column_config.TextColumn("🧪 Code 33", width=150, help="連續三季的 EPS YoY、營收 YoY、淨利率是否同步呈現遞增趨勢。✅=三加速確認"),
+                        "🚀 月營收爆發": st.column_config.TextColumn("🚀 月營收爆發", width=150, help="月營收創12M新高 或 YoY連2月加速")
                     }
                     if is_backtesting:
                         column_config_dict[perf_col_name] = st.column_config.NumberColumn(f"🎯 後續{holding_days}日報酬", format="%.2f%%")
