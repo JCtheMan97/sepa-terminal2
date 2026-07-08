@@ -898,12 +898,17 @@ with st.sidebar.expander("🔌 數據引擎與資料時間診斷", expanded=True
             st.session_state.finmind_token = ""
 
     # 使用 key="finmind_token" 讓 Streamlit 自動同步並更新 session state
-    st.text_input(
+    token_input = st.text_input(
         "🔑 FinMind Token (選填)",
         type="password",
         key="finmind_token",
         help="輸入您的 FinMind 個人 Token 可大幅提升每日 API 讀取額度，避免營收資料退回 yfinance 備援狀態。"
     )
+
+    if token_input:
+        st.success("🟢 Token 已載入！已啟用個人 API 額度")
+    else:
+        st.info("💡 目前使用匿名限制模式")
 
     # 檢測 token 是否變更，若變更則清空快取
     if "last_finmind_token" not in st.session_state:
