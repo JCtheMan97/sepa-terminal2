@@ -228,22 +228,29 @@ if DISPOSITION_MAP:
 
 # --- 🚀 基本面 API 數據獲取（快取存入 session_state 以跨 rerun 持久化） ---
 
-def _get_fin_cache():
-    if "_fin_cache" not in st.session_state:
-        st.session_state._fin_cache = {}
-    return st.session_state._fin_cache
+def get_finmind_token():
+    """從 session_state 或 st.secrets 取得選填的 FinMind Token"""
+    if "finmind_token" in st.session_state and st.session_state.finmind_token:
+        return st.session_state.finmind_token.strip()
+    try:
+        return st.secrets.get("FINMIND_TOKEN", "").strip()
+    except Exception:
+        return ""
 
-def _get_rev_cache():
-    if "_rev_cache" not in st.session_state:
-        st.session_state._rev_cache = {}
-    return st.session_state._rev_cache
+# --- 🚀 基本面 API 數據獲取（快取存入 session_state 以跨 rerun 持久化） ---
 
-def fetch_finmind_financials(stock_id):
+def get_finmind_token():
+    """從 session_state 或 st.secrets 取得選填的 FinMind Token"""
+    if "finmind_token" in st.session_state and st.session_state.finmind_token:
+        return st.session_state.finmind_token.strip()
+    try:
+        return st.secrets.get("FINMIND_TOKEN", "").strip()
+    except Exception:
+        return ""
+
+@st.cache_data(ttl=86400)
+def fetch_finmind_financials(stock_id, token):
     """獲取季度損益表數據 (首選 FinMind，失敗則自動以 yfinance 作為免費備援)"""
-    cache = _get_fin_cache()
-    if stock_id in cache:
-        return cache[stock_id]
-        
     # 1. 嘗試 FinMind API
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
@@ -251,12 +258,13 @@ def fetch_finmind_financials(stock_id):
         "data_id": stock_id,
         "start_date": "2024-01-01"
     }
+    if token:
+        params["token"] = token
     try:
         r = requests.get(url, params=params, timeout=8)
         if r.status_code == 200:
             data = r.json().get("data", [])
             if data:
-                _get_fin_cache()[stock_id] = data
                 return data
     except Exception:
         pass
@@ -291,19 +299,15 @@ def fetch_finmind_financials(stock_id):
                             records.append({'date': date_str, 'stock_id': stock_id, 'type': 'EPS', 'value': float(val)})
                 
                 if records:
-                    _get_fin_cache()[stock_id] = records
                     return records
         except Exception:
             pass
             
     return []
 
-def fetch_finmind_monthly_revenue(stock_id):
+@st.cache_data(ttl=86400)
+def fetch_finmind_monthly_revenue(stock_id, token):
     """獲取月營收數據 (首選 FinMind，失敗則自動以 yfinance 季度營收近似)"""
-    cache = _get_rev_cache()
-    if stock_id in cache:
-        return cache[stock_id]
-        
     # 1. 嘗試 FinMind API
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
@@ -311,12 +315,13 @@ def fetch_finmind_monthly_revenue(stock_id):
         "data_id": stock_id,
         "start_date": "2024-01-01"
     }
+    if token:
+        params["token"] = token
     try:
         r = requests.get(url, params=params, timeout=8)
         if r.status_code == 200:
             data = r.json().get("data", [])
             if data:
-                _get_rev_cache()[stock_id] = data
                 return data
     except Exception:
         pass
@@ -360,7 +365,6 @@ def fetch_finmind_monthly_revenue(stock_id):
                     key = (rec["revenue_year"], rec["revenue_month"])
                     seen[key] = rec
                 deduped = list(seen.values())
-                _get_rev_cache()[stock_id] = deduped
                 return deduped
         except Exception:
             pass
@@ -612,13 +616,13 @@ def process_earnings_surprise(surprise_json, backtest_date):
 # --- 🚀 多線程併發加載基本面數據 ---
 
 def get_single_stock_fundamentals(args):
-    ticker, backtest_date = args
+    ticker, backtest_date, token = args
     stock_id = ticker.split('.')[0]
     backtest_date_str = backtest_date.strftime('%Y-%m-%d')
     
     # 1. 抓取數據 (使用 Cache / Fallback)
-    financials = fetch_finmind_financials(stock_id)
-    monthly_rev = fetch_finmind_monthly_revenue(stock_id)
+    financials = fetch_finmind_financials(stock_id, token)
+    monthly_rev = fetch_finmind_monthly_revenue(stock_id, token)
     
     # 2. 計算基本面指標
     c33 = process_code33(financials, backtest_date_str)
@@ -629,7 +633,8 @@ def get_single_stock_fundamentals(args):
 def fetch_all_fundamentals(tickers, backtest_date):
     """併發加載所有股票的基本面資料"""
     results = {}
-    args_list = [(ticker, backtest_date) for ticker in tickers]
+    token = get_finmind_token()
+    args_list = [(ticker, backtest_date, token) for ticker in tickers]
     with ThreadPoolExecutor(max_workers=20) as executor:
         futures_results = list(executor.map(get_single_stock_fundamentals, args_list))
     for ticker, c33, mrev in futures_results:
@@ -885,10 +890,32 @@ with st.sidebar.form("sepa_integrated_form"):
 # --- 🔌 API 連線與資料時間診斷 ---
 st.sidebar.markdown("---")
 with st.sidebar.expander("🔌 數據引擎與資料時間診斷", expanded=True):
+    # 初始化 session state 中的 token
+    if "finmind_token" not in st.session_state:
+        try:
+            st.session_state.finmind_token = st.secrets.get("FINMIND_TOKEN", "")
+        except Exception:
+            st.session_state.finmind_token = ""
+
+    # 使用 key="finmind_token" 讓 Streamlit 自動同步並更新 session state
+    st.text_input(
+        "🔑 FinMind Token (選填)",
+        type="password",
+        key="finmind_token",
+        help="輸入您的 FinMind 個人 Token 可大幅提升每日 API 讀取額度，避免營收資料退回 yfinance 備援狀態。"
+    )
+
+    # 檢測 token 是否變更，若變更則清空快取
+    if "last_finmind_token" not in st.session_state:
+        st.session_state.last_finmind_token = st.session_state.finmind_token
+    elif st.session_state.last_finmind_token != st.session_state.finmind_token:
+        st.session_state.last_finmind_token = st.session_state.finmind_token
+        st.cache_data.clear()
+
     st.caption("系統會自動測試 API 連線並回報最新數據更新時間：")
     
     @st.cache_data(ttl=300) # 每5分鐘重新診斷一次
-    def run_fast_diagnose():
+    def run_fast_diagnose(token):
         diag_info = {}
         # 1. FinMind
         try:
@@ -898,6 +925,8 @@ with st.sidebar.expander("🔌 數據引擎與資料時間診斷", expanded=True
                 "data_id": "2330",
                 "start_date": (datetime.today() - timedelta(days=60)).strftime('%Y-%m-%d')
             }
+            if token:
+                params["token"] = token
             r = requests.get(url, params=params, timeout=5)
             if r.status_code == 200:
                 data = r.json().get("data", [])
@@ -925,7 +954,7 @@ with st.sidebar.expander("🔌 數據引擎與資料時間診斷", expanded=True
             
         return diag_info
         
-    diag_results = run_fast_diagnose()
+    diag_results = run_fast_diagnose(st.session_state.finmind_token)
     for name, status in diag_results.items():
         st.write(f"**{name}**")
         st.write(status)
