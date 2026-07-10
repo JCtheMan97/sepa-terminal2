@@ -586,9 +586,14 @@ def process_monthly_momentum(monthly_rev, backtest_date_str):
 
 @st.cache_data(ttl=86400)
 def fetch_yfinance_earnings_surprise(ticker, backtest_date):
-    """獲取 yfinance 盈餘意外數據，並進行歷史回溯過濾，快取 24 小時"""
+    """獲取 yfinance 盈餘意外數據，並進行歷史回溯過濾，快取 24 小時，使用自訂 Session 防禦雲端封鎖"""
     try:
-        tick = yf.Ticker(ticker)
+        import requests
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        })
+        tick = yf.Ticker(ticker, session=session)
         ed = tick.earnings_dates
         if ed is not None and not ed.empty:
             # 轉換回 timezone-aware cutoff 來做歷史回溯過濾
@@ -989,6 +994,11 @@ with st.sidebar.expander("🔌 數據引擎與資料時間診斷", expanded=True
     for name, status in diag_results.items():
         st.write(f"**{name}**")
         st.write(status)
+
+    st.markdown("---")
+    if st.button("🧹 清除數據快取 (重新抓取歷史資料)", use_container_width=True):
+        st.cache_data.clear()
+        st.success("⚡ 快取已成功清空，下次執行選股將重新向伺服器拉取最新資料！")
 
 def get_stocks_pool(text):
     """智能掃描器：自動比對輸入文字與 STOCK_DICT 名稱，防範模糊比對誤判與暗雷"""
