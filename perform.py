@@ -968,55 +968,77 @@ with st.sidebar.expander("🔌 數據引擎與資料時間診斷", expanded=True
 
 
 def get_stocks_pool(text):
-    """智能掃描器：自動比對輸入文字與 STOCK_DICT 名稱，防範模糊比對誤判與暗雷"""
+    """智能掃描器：自動分割並比對輸入文字與 STOCK_DICT 名稱，支援多種分隔符號並防範模糊比對誤判"""
     pool = []
 
-    # 將每一行切割處理
-    for line in text.split('\n'):
-        line = line.strip()
-        if not line: continue
+    # 支援新行、半角逗號、全角逗號、空格、分號等分隔符
+    tokens = re.split(r'[\n\r,，;；\s\t]+', text)
 
-        # 1. 第一優先：Regex 抓代號 (最準確)
-        code_match = re.search(r'\b\d{4,6}\b', line)
-        if code_match:
-            code = code_match.group()
-            # 檢查 code 或 code.TW / code.TWO
+    for token in tokens:
+        token = token.strip()
+        if not token:
+            continue
+
+        # 1. 第一優先：精確匹配股票代號 (四至六位數字)
+        if token.isdigit() and 4 <= len(token) <= 6:
             found = False
             for suffix in ["", ".TW", ".TWO"]:
-                target = f"{code}{suffix}" if suffix else code
+                target = f"{token}{suffix}" if suffix else token
                 if target in STOCK_DICT:
                     pool.append({"id": target, "name": STOCK_DICT[target]})
                     found = True
                     break
-            if found: continue
+            if found:
+                continue
 
-        # 2. 第二優先：精確與模糊名稱比對 (防範模糊比對誤判與暗雷)
+        # 2. 第二優先：名稱比對
         found_name = False
-        clean_line = line.upper()
+        clean_token = token.upper()
 
         exact_matches = []
         substring_matches = []
 
         for code, official_name in STOCK_DICT.items():
             off_name_upper = official_name.upper()
-            if clean_line == off_name_upper:
+            if clean_token == off_name_upper:
                 exact_matches.append({"id": code, "name": official_name})
-            elif clean_line in off_name_upper:
+            elif clean_token in off_name_upper:
                 substring_matches.append({"id": code, "name": official_name})
 
         if exact_matches:
             pool.append(exact_matches[0])
             found_name = True
         elif substring_matches:
-            # 若有多個子字串匹配，依官方名稱字串長度由短到長排序，優先採用字串最接近的標的
             substring_matches.sort(key=lambda x: len(x["name"]))
             pool.append(substring_matches[0])
             found_name = True
 
         if not found_name:
-            st.sidebar.warning(f"⚠️ 找不到此標的: {line}")
+            # 備援：若 token 含有非純數字（例如 "2330.TW" 或 "2330台積電"），嘗試用 Regex 提取代號
+            code_match = re.search(r'\d{4,6}', token)
+            if code_match:
+                code = code_match.group()
+                found = False
+                for suffix in ["", ".TW", ".TWO"]:
+                    target = f"{code}{suffix}" if suffix else code
+                    if target in STOCK_DICT:
+                        pool.append({"id": target, "name": STOCK_DICT[target]})
+                        found = True
+                        break
+                if found:
+                    continue
 
-    return list({item['id']: item for item in pool}.values())
+            st.sidebar.warning(f"⚠️ 找不到此標的: {token}")
+
+    # 去除重複
+    seen = set()
+    unique_pool = []
+    for item in pool:
+        if item['id'] not in seen:
+            seen.add(item['id'])
+            unique_pool.append(item)
+
+    return unique_pool
 
 def fetch_official_latest_prices(latest_date):
     """
