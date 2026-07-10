@@ -616,12 +616,13 @@ def get_single_stock_fundamentals(args):
     # 1. 抓取數據 (使用 Cache / Fallback)
     financials = fetch_finmind_financials(stock_id, token)
     monthly_rev = fetch_finmind_monthly_revenue(stock_id, token)
+    surprise = fetch_yfinance_earnings_surprise(ticker, backtest_date)
 
     # 2. 計算基本面指標
     c33 = process_code33(financials, backtest_date_str)
     mrev = process_monthly_momentum(monthly_rev, backtest_date_str)
 
-    return ticker, c33, mrev
+    return ticker, c33, mrev, surprise
 
 def fetch_all_fundamentals(tickers, backtest_date):
     """併發加載所有股票的基本面資料"""
@@ -630,10 +631,11 @@ def fetch_all_fundamentals(tickers, backtest_date):
     args_list = [(ticker, backtest_date, token) for ticker in tickers]
     with ThreadPoolExecutor(max_workers=20) as executor:
         futures_results = list(executor.map(get_single_stock_fundamentals, args_list))
-    for ticker, c33, mrev in futures_results:
+    for ticker, c33, mrev, surprise in futures_results:
         results[ticker] = {
             "c33": c33,
-            "mrev": mrev
+            "mrev": mrev,
+            "surprise": surprise
         }
     return results
 
@@ -1263,6 +1265,12 @@ if submit_btn or st.session_state.first_run:
                         fund_data = FUNDAMENTAL_RESULTS.get(ticker, {})
                         c33_display = fund_data.get("c33", {}).get("display", "N/A")
                         mrev_display = fund_data.get("mrev", {}).get("display", "N/A")
+                        surprise_data = fund_data.get("surprise")
+                        if surprise_data:
+                            surp_val = surprise_data["surprise"]
+                            surprise_display = f"+{surp_val:.1f}%" if surp_val > 0 else f"{surp_val:.1f}%"
+                        else:
+                            surprise_display = "N/A"
 
                         integrated_results.append({
                             "ticker": ticker,
@@ -1273,6 +1281,7 @@ if submit_btn or st.session_state.first_run:
                             "動能狀態判定": vcp_status_final,
                             "🧪 Code 33": c33_display,
                             "🚀 月營收爆發": mrev_display,
+                            "💥 盈餘意外": surprise_display,
                             "50MA乖離率(%)": bias_50,
                             "IBD式 絕對分數": ibd, "對比 0050 超額強度": rel_strength_0050,
                             "短線抗跌韌性分數": resilience, "逆風勝率": f"{outperform} / {total_panic_days} 天",
@@ -1285,7 +1294,7 @@ if submit_btn or st.session_state.first_run:
                     cols = df_final.columns.tolist()
                     perf_col_name = f"後續{holding_days}日實際報酬(%)"
 
-                    fundamental_cols = ["🧪 Code 33", "🚀 月營收爆發"]
+                    fundamental_cols = ["🧪 Code 33", "🚀 月營收爆發", "💥 盈餘意外"]
 
                     for f_col in fundamental_cols:
                         if f_col in cols:
@@ -1469,6 +1478,27 @@ if submit_btn or st.session_state.first_run:
                                     )
                                 if mrev_12h or mrev_acc:
                                     details_lines.append(f"🚀 <b>月營收動能軌跡：</b><br>" + mrev.get("trajectory", "").replace("\\n", "<br>"))
+
+                                # 💥 盈餘意外
+                                surprise = fund.get("surprise")
+                                if surprise:
+                                    val = surprise["surprise"]
+                                    est = surprise["estimate"]
+                                    act = surprise["actual"]
+                                    dt = surprise["date"]
+                                    if val > 0:
+                                        sub_badges_list.append(
+                                            f'<span style="background:#fff7e6;color:#d46b08;border:1px solid #ffd591;'
+                                            f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
+                                            f'margin-right:5px;">💥 意外 +{val:.1f}%</span>'
+                                        )
+                                    else:
+                                        sub_badges_list.append(
+                                            f'<span style="background:#fff0f6;color:#c41d7f;border:1px solid #ffadd2;'
+                                            f'padding:1px 8px;border-radius:10px;font-size:0.82em;font-weight:bold;'
+                                            f'margin-right:5px;">💥 意外 {val:.1f}%</span>'
+                                        )
+                                    details_lines.append(f"💥 <b>EPS 意外數據：</b><br>預估 EPS: {est:.2f} ｜ 實際 EPS: {act:.2f} ｜ 公佈日期: {dt}")
 
                             # 用 div 包裹主行，避免 markdown * 與 HTML 混排錯位
                             item_html = f"<div style='margin-bottom:10px;line-height:1.6;font-size:0.95em;'>"
