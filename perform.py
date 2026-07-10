@@ -912,32 +912,63 @@ with st.sidebar.expander("🔌 數據引擎與資料時間診斷", expanded=True
 
     st.caption("系統會自動測試 API 連線並回報最新數據更新時間：")
 
-    @st.cache_data(ttl=300) # 每5分鐘重新診斷一次
+    @st.cache_data(ttl=1800) # 每30分鐘重新診斷一次，全域快取節省 Token
     def run_fast_diagnose(token):
         diag_info = {}
-        # 1. FinMind
+        # 1. FinMind (使用聯邦觀測：併發查詢八大龍頭，取其最新月份以防單一公司延遲)
         try:
             url = "https://api.finmindtrade.com/api/v4/data"
-            params = {
-                "dataset": "TaiwanStockMonthRevenue",
-                "data_id": "2330",
-                "start_date": (datetime.today() - timedelta(days=60)).strftime('%Y-%m-%d')
-            }
-            if token:
-                params["token"] = token
-            r = requests.get(url, params=params, timeout=5)
-            if r.status_code == 200:
-                data = r.json().get("data", [])
-                if data:
-                    diag_info["FinMind (月營收)"] = f"🟢 正常 (最新: {data[-1]['revenue_year']}/{data[-1]['revenue_month']})"
+            test_tickers = ["2330", "2303", "2317", "2454", "2382", "2301", "3711", "2409"]
+            latest_year = 0
+            latest_month = 0
+            
+            def fetch_single(data_id):
+                params = {
+                    "dataset": "TaiwanStockMonthRevenue",
+                    "data_id": data_id,
+                    "start_date": (datetime.today() - timedelta(days=90)).strftime('%Y-%m-%d')
+                }
+                if token:
+                    params["token"] = token
+                try:
+                    r = requests.get(url, params=params, timeout=3)
+                    if r.status_code == 200:
+                        data = r.json().get("data", [])
+                        if data:
+                            return int(data[-1]['revenue_year']), int(data[-1]['revenue_month'])
+                    elif r.status_code in [402, 429]:
+                        return r.status_code, None
+                except Exception:
+                    pass
+                return None, None
+
+            # 併發查詢 8 檔以提升診斷速度
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                results = list(executor.map(fetch_single, test_tickers))
+            
+            has_limit_error = False
+            limit_code = None
+            for y, m in results:
+                if y in [402, 429]:
+                    has_limit_error = True
+                    limit_code = y
+                    break
+                if y is not None and m is not None:
+                    if (y > latest_year) or (y == latest_year and m > latest_month):
+                        latest_year = y
+                        latest_month = m
+            
+            if has_limit_error:
+                if limit_code == 402:
+                    diag_info["FinMind (月營收)"] = "🔴 額度超限/付費限制 (HTTP 402)"
                 else:
-                    diag_info["FinMind (月營收)"] = "🟡 無回傳資料"
-            elif r.status_code == 402:
-                diag_info["FinMind (月營收)"] = "🔴 額度超限/付費限制 (HTTP 402)"
+                    diag_info["FinMind (月營收)"] = "🔴 速率限制 (HTTP 429)"
+            elif latest_year > 0:
+                diag_info["FinMind (月營收)"] = f"🟢 正常 (最新: {latest_year}/{latest_month})"
             else:
-                diag_info["FinMind (月營收)"] = f"🔴 錯誤 (HTTP {r.status_code})"
+                diag_info["FinMind (月營收)"] = "🟡 無回傳資料"
         except Exception as e:
-            diag_info["FinMind (月營收)"] = f"🔴 連線失敗: {type(e).__name__}"
+            diag_info["FinMind (月營收)"] = f"🔴 系統異常: {type(e).__name__}"
 
         # 2. yfinance (改用歷史價格測試，避開有依賴問題的 get_earnings_dates)
         try:
