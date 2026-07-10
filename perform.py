@@ -8,7 +8,7 @@ import re
 import requests
 from io import StringIO
 from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
+
 from bs4 import BeautifulSoup
 
 # 1. 網頁初始設定
@@ -234,8 +234,9 @@ def get_finmind_token():
 
 @st.cache_data(ttl=86400)
 def fetch_finmind_financials(stock_id, token):
-    """獲取季度損益表數據 (首選 FinMind，失敗則自動以 yfinance 作為免費備援)"""
-    # 1. 嘗試 FinMind API
+    """獲取季度損益表數據 (首選 FinMind，失敗則自動以 yfinance 作為免費備援，支援重試與避退)"""
+    import time
+    # 1. 嘗試 FinMind API (最多重試 2 次)
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
         "dataset": "TaiwanStockFinancialStatements",
@@ -244,14 +245,20 @@ def fetch_finmind_financials(stock_id, token):
     }
     if token:
         params["token"] = token
-    try:
-        r = requests.get(url, params=params, timeout=8)
-        if r.status_code == 200:
-            data = r.json().get("data", [])
-            if data:
-                return data
-    except Exception:
-        pass
+    for attempt in range(2):
+        try:
+            r = requests.get(url, params=params, timeout=8)
+            if r.status_code == 200:
+                data = r.json().get("data", [])
+                if data:
+                    return data
+            elif r.status_code in [402, 429]:
+                time.sleep(1.0)
+                continue
+        except (requests.exceptions.RequestException, Exception):
+            if attempt < 1:
+                time.sleep(0.5)
+                continue
 
     # 2. 備援機制：使用 yfinance 獲取季度財報數據 (免費且免 Token)
     for suffix in [".TW", ".TWO"]:
@@ -291,8 +298,9 @@ def fetch_finmind_financials(stock_id, token):
 
 @st.cache_data(ttl=86400)
 def fetch_finmind_monthly_revenue(stock_id, token):
-    """獲取月營收數據 (首選 FinMind，失敗則自動以 yfinance 季度營收近似)"""
-    # 1. 嘗試 FinMind API
+    """獲取月營收數據 (首選 FinMind，失敗則自動以 yfinance 季度營收近似，支援重試與避退)"""
+    import time
+    # 1. 嘗試 FinMind API (最多重試 2 次)
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
         "dataset": "TaiwanStockMonthRevenue",
@@ -301,14 +309,20 @@ def fetch_finmind_monthly_revenue(stock_id, token):
     }
     if token:
         params["token"] = token
-    try:
-        r = requests.get(url, params=params, timeout=8)
-        if r.status_code == 200:
-            data = r.json().get("data", [])
-            if data:
-                return data
-    except Exception:
-        pass
+    for attempt in range(2):
+        try:
+            r = requests.get(url, params=params, timeout=8)
+            if r.status_code == 200:
+                data = r.json().get("data", [])
+                if data:
+                    return data
+            elif r.status_code in [402, 429]:
+                time.sleep(1.0)
+                continue
+        except (requests.exceptions.RequestException, Exception):
+            if attempt < 1:
+                time.sleep(0.5)
+                continue
 
     # 2. 備援：yfinance 季度營收轉月營收近似值
     for suffix in [".TW", ".TWO"]:
@@ -570,29 +584,24 @@ def process_monthly_momentum(monthly_rev, backtest_date_str):
         "latest_yoy": yoy_latest
     }
 
-def process_earnings_surprise(surprise_json, backtest_date):
-    """
-    從 yfinance 導出 JSON 中提取最近的盈餘意外數據。
-    """
-    if not surprise_json:
-        return None
+@st.cache_data(ttl=86400)
+def fetch_yfinance_earnings_surprise(ticker, backtest_date):
+    """獲取 yfinance 盈餘意外數據，並進行歷史回溯過濾，快取 24 小時"""
     try:
-        ed = pd.read_json(StringIO(surprise_json))
-        if ed.empty:
-            return None
-
-        # 轉換回 timezone-aware cutoff 來做歷史回溯過濾
-        cutoff = pd.to_datetime(backtest_date).tz_localize(ed.index.tz)
-        df_reported = ed[ed.index <= cutoff].dropna(subset=['Reported EPS', 'EPS Estimate', 'Surprise(%)'])
-
-        if not df_reported.empty:
-            latest = df_reported.iloc[0] # yfinance 由新到舊排列
-            return {
-                "estimate": float(latest['EPS Estimate']),
-                "actual": float(latest['Reported EPS']),
-                "surprise": float(latest['Surprise(%)']),
-                "date": df_reported.index[0].strftime('%Y-%m-%d')
-            }
+        tick = yf.Ticker(ticker)
+        ed = tick.earnings_dates
+        if ed is not None and not ed.empty:
+            # 轉換回 timezone-aware cutoff 來做歷史回溯過濾
+            cutoff = pd.to_datetime(backtest_date).tz_localize(ed.index.tz)
+            df_reported = ed[ed.index <= cutoff].dropna(subset=['Reported EPS', 'EPS Estimate', 'Surprise(%)'])
+            if not df_reported.empty:
+                latest = df_reported.iloc[0] # yfinance 由新到舊排列
+                return {
+                    "estimate": float(latest['EPS Estimate']),
+                    "actual": float(latest['Reported EPS']),
+                    "surprise": float(latest['Surprise(%)']),
+                    "date": df_reported.index[0].strftime('%Y-%m-%d')
+                }
     except Exception:
         pass
     return None
@@ -852,9 +861,9 @@ with st.sidebar.form("sepa_integrated_form"):
 
     default_pool = (
         "2337.TW,旺宏\n3028.TW,增你強\n3550.TW,聯穎\n6187.TWO,萬潤\n3037.TW,欣興\n3017.TW,奇鋐\n"
-        "2478.TW,大毅\n4749.TWO,新應材\n3680.TWO,家登\n8021.TW,尖點\n3481.TW,群創\n"
+        "8086.TWO,宏捷科\n4749.TWO,新應材\n3680.TWO,家登\n8021.TW,尖點\n3481.TW,群創\n"
         "8438.TW,昶昕\n3691.TWO,碩禾\n2423.TW,固緯\n8147.TWO,正淩\n8028.TW,昇陽半導體\n6716.TWO,應廣\n2428.TW,興勤\n5284.TW,JPP-KY\n"
-        "2493.TW,揚博\n3023.TW,信邦\n6672.TW,騰輝電子\n3044.TW,健鼎\n3022.TW,威強電\n3577.TWO,泓格\n3305.TW,昇貿"
+        "2493.TW,揚博\n3023.TW,信邦\n6672.TW,騰輝電子\n3044.TW,健鼎\n6134.TWO,萬旭\n2413.TW,環科\n3577.TWO,泓格\n3305.TW,昇貿"
     )
     stock_input = st.text_area("股票清單 (支援複製貼上！系統會自動過濾國籍、財報等非代號雜訊)", value=default_pool, height=300)
 
@@ -1305,7 +1314,8 @@ if submit_btn or st.session_state.first_run:
                         "IBD式 絕對分數": st.column_config.NumberColumn("IBD式 絕對強度", format="%.1f"),
                         "短線抗跌韌性分數": st.column_config.ProgressColumn("抗跌得分", min_value=0, max_value=100, format="%.0f分"),
                         "🧪 Code 33": st.column_config.TextColumn("🧪 Code 33", width=150, help="連續三季的 EPS YoY、營收 YoY、淨利率是否同步呈現遞增趨勢。✅=三加速確認"),
-                        "🚀 月營收爆發": st.column_config.TextColumn("🚀 月營收爆發", width=150, help="月營收創12M新高 或 YoY連2月加速")
+                        "🚀 月營收爆發": st.column_config.TextColumn("🚀 月營收爆發", width=150, help="月營收創12M新高 或 YoY連2月加速"),
+                        "💥 盈餘意外": st.column_config.TextColumn("💥 盈餘意外", width=150, help="實際公佈每股盈餘與分析師預估值之意外比例 (%)")
                     }
                     if is_backtesting:
                         column_config_dict[perf_col_name] = st.column_config.NumberColumn(f"🎯 後續{holding_days}日報酬", format="%.2f%%")
@@ -1321,7 +1331,7 @@ if submit_btn or st.session_state.first_run:
                     # 說明文字：依開關狀態而異
                     desc_lines = []
                     if show_fundamental:
-                        desc_lines.append("🧪 <b>Code 33</b> = 連3季 EPS/營收/淨利率三加速&nbsp;｜&nbsp;🚀 <b>月營收</b> = 創12M新高 或 YoY連2月加速")
+                        desc_lines.append("🧪 <b>Code 33</b> = 連3季 EPS/營收/淨利率三加速&nbsp;｜&nbsp;🚀 <b>月營收</b> = 創12M新高 或 YoY連2月加速&nbsp;｜&nbsp;💥 <b>盈餘意外</b> = 實際優於預估 EPS")
                         desc_lines.append(
                             "🔬 <b>馬克的 SEPA 基本面心法備註</b>：<br>"
                             "&nbsp;&nbsp;• <b>「技術面決定進場時機，基本面決定漲幅高度」</b>：馬克指出，90% 的超級飆股在發動主升段前，其盈餘與營收均呈現『加速增長』的特徵。<br>"
