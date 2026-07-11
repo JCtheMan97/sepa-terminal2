@@ -221,17 +221,6 @@ def get_finmind_token():
     except Exception:
         return ""
 
-# --- 🚀 基本面 API 數據獲取（快取存入 session_state 以跨 rerun 持久化） ---
-
-def get_finmind_token():
-    """從 session_state 或 st.secrets 取得選填的 FinMind Token"""
-    if "finmind_token" in st.session_state and st.session_state.finmind_token:
-        return st.session_state.finmind_token.strip()
-    try:
-        return st.secrets.get("FINMIND_TOKEN", "").strip()
-    except Exception:
-        return ""
-
 @st.cache_data(ttl=86400)
 def fetch_finmind_financials(stock_id, token):
     """獲取季度損益表數據 (首選 FinMind，失敗則自動以 yfinance 作為免費備援，支援重試與避退)"""
