@@ -17,37 +17,6 @@ from bs4 import BeautifulSoup
 # 1. 網頁初始設定
 st.set_page_config(page_title="🏆 SEPA 雙軌強勢股終端機", layout="wide")
 
-# 注入自訂高級視覺 CSS 樣式 (Glassmorphism & Card Style)
-st.markdown("""
-<style>
-    /* 全域字體與卡片圓角 */
-    .stApp {
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    }
-    
-    /* 四象限邊框圓角與陰影效果 */
-    div.stAlert, div.stMarkdown, [data-testid="stVerticalBlock"] > div {
-        border-radius: 8px;
-    }
-    
-    /* 自訂卡片 hover 效果 */
-    .quadrant-card {
-        background: rgba(128, 128, 128, 0.03);
-        border: 1px solid rgba(128, 128, 128, 0.1);
-        border-radius: 8px;
-        padding: 10px 14px;
-        margin-bottom: 10px;
-        transition: all 0.2s ease-in-out;
-    }
-    .quadrant-card:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 4px 12px rgba(0,0,0,0.08);
-        background: rgba(128, 128, 128, 0.06);
-        border-color: rgba(128, 128, 128, 0.2);
-    }
-</style>
-""", unsafe_allow_html=True)
-
 
 # 2. 自動載入與動態初始化後台字典 (相容 UTF-8-sig)
 @st.cache_data
@@ -1595,9 +1564,9 @@ if submit_btn or st.session_state.first_run:
                                     details_lines.append(f"🚀 <b>月營收動能軌跡：</b><br>" + mrev.get("trajectory", "").replace("\\n", "<br>"))
 
 
-                            # 用 div 包裹主行，啟用卡片與 hover 樣式
-                            item_html = f"<div class='quadrant-card'>"
-                            item_html += f"<div>{main_line}</div>"
+                            # 用 div 包裹主行，避免 markdown * 與 HTML 混排錯位
+                            item_html = f"<div style='margin-bottom:10px;line-height:1.6;font-size:0.95em;'>"
+                            item_html += f"<div>• {main_line}</div>"
 
                             # 徽章子行
                             if sub_badges_list:
@@ -1628,121 +1597,6 @@ if submit_btn or st.session_state.first_run:
                     c1.info(f"### 🚀 第二象限：高 Beta 攻擊兵 ({len(momentum_only)} 檔)"); c1.markdown(format_stocks(momentum_only, is_backtesting), unsafe_allow_html=True); c1.caption("👉 戰略部署：長線極強，但修正波動高於大盤. 一旦大盤止穩，這群股票往往是右側出量追擊的首選。")
                     c2.warning(f"### 🛡️ 第三象限：資金避風港 ({len(defensive_only)} 檔)"); c2.markdown(format_stocks(defensive_only, is_backtesting), unsafe_allow_html=True); c2.caption("👉 戰略部署：短線極度抗跌，長線動能尚未完全追上。若有打打底完成標的，高抗跌意味主力在低檔死守，值得關注！")
                     c2.error(f"### 🚨 第四象限：無情剔除名單 ({len(laggards)} 檔)"); c2.markdown(format_stocks(laggards, is_backtesting), unsafe_allow_html=True); c2.caption("👉 戰略部署：長短線皆跑輸大盤，在馬克系統中屬於弱勢標的，建議審慎評估資金配置與汰弱留強。")
-
-                    # --- 📈 Plotly 互動式圖表與個股分析 ---
-                    st.divider()
-                    st.subheader("📈 個股技術分析與相對強度 VCP 壓縮軌跡")
-                    
-                    # 獲取所有分析標的
-                    all_analyzed_tickers = df_final["ticker"].tolist()
-                    if all_analyzed_tickers:
-                        selected_ticker = st.selectbox(
-                            "🔍 選擇要檢視詳細圖表的股票：",
-                            options=all_analyzed_tickers,
-                            format_func=lambda x: f"{x.split('.')[0]} {STOCK_DICT.get(x, '')}"
-                        )
-                        
-                        if selected_ticker in df_all.columns.levels[1]:
-                            # 提取該個股的資料
-                            df_stock = df_all.xs(selected_ticker, level=1, axis=1).copy()
-                            # 為了計算 MA
-                            df_stock['MA50'] = df_stock['Close'].rolling(window=50).mean()
-                            df_stock['MA150'] = df_stock['Close'].rolling(window=150).mean()
-                            df_stock['MA200'] = df_stock['Close'].rolling(window=200).mean()
-                            
-                            # 提取大盤 0050 的對齊價格以計算 Alpha RS 曲線
-                            benchmark_ticker = "0050.TW"
-                            if benchmark_ticker in df_all.columns.levels[1]:
-                                df_bench = df_all.xs(benchmark_ticker, level=1, axis=1)['Close']
-                                b_aligned = df_bench.reindex(df_stock.index).ffill()
-                                rel_val = df_stock['Close'] / b_aligned
-                                rel_3m = rel_val.shift(63)
-                                rel_6m = rel_val.shift(126)
-                                rel_9m = rel_val.shift(189)
-                                rel_1y = rel_val.shift(252)
-                                df_stock['Alpha_RS'] = ((rel_val/rel_3m*2) + (rel_val/rel_6m) + (rel_val/rel_9m) + (rel_val/rel_1y)) / 5 * 100
-                            
-                            df_stock['CV5'] = df_stock['Close'].rolling(5).std() / df_stock['Close'].rolling(5).mean()
-                            df_stock['CV20'] = df_stock['Close'].rolling(20).std() / df_stock['Close'].rolling(20).mean()
-                            df_stock['CV_Ratio'] = (df_stock['CV5'] / df_stock['CV20']) * 100
-                            
-                            # 取最後 250 筆做繪圖
-                            df_plot = df_stock.iloc[-250:]
-                            
-                            # 使用 Plotly 繪圖
-                            import plotly.graph_objects as go
-                            from plotly.subplots import make_subplots
-                            
-                            # 建立包含兩個子圖的繪圖對象
-                            fig = make_subplots(
-                                rows=2, cols=1,
-                                shared_xaxes=True,
-                                vertical_spacing=0.1,
-                                subplot_titles=("📊 股價均線排列 與相對強度 (Alpha RS) 軌跡", "🌀 成交量與 VCP 價格波幅收縮率 (CV Ratio)"),
-                                specs=[[{"secondary_y": True}], [{"secondary_y": True}]]
-                            )
-                            
-                            # --- 子圖一：股價與均線 & Alpha RS ---
-                            # 股價
-                            fig.add_trace(
-                                go.Scatter(x=df_plot.index, y=df_plot['Close'], name="收盤價", line=dict(color='#1890ff', width=2)),
-                                row=1, col=1, secondary_y=False
-                            )
-                            # MA50
-                            fig.add_trace(
-                                go.Scatter(x=df_plot.index, y=df_plot['MA50'], name="50 MA", line=dict(color='#52c41a', width=1.2, dash='dash')),
-                                row=1, col=1, secondary_y=False
-                            )
-                            # MA150
-                            fig.add_trace(
-                                go.Scatter(x=df_plot.index, y=df_plot['MA150'], name="150 MA", line=dict(color='#fa8c16', width=1.2, dash='dash')),
-                                row=1, col=1, secondary_y=False
-                            )
-                            # MA200
-                            fig.add_trace(
-                                go.Scatter(x=df_plot.index, y=df_plot['MA200'], name="200 MA", line=dict(color='#f5222d', width=1.5, dash='dash')),
-                                row=1, col=1, secondary_y=False
-                            )
-                            # Alpha RS 曲線 (副座標軸)
-                            if 'Alpha_RS' in df_plot.columns:
-                                fig.add_trace(
-                                    go.Scatter(x=df_plot.index, y=df_plot['Alpha_RS'], name="Alpha RS (相對 0050 強度)", line=dict(color='#722ed1', width=2.5)),
-                                    row=1, col=1, secondary_y=True
-                                )
-                            
-                            # --- 子圖二：成交量與 VCP 壓縮 ---
-                            # 成交量 (紅漲綠跌 - 台股標準)
-                            volume_colors = ['#cf1322' if close >= open_val else '#3f8600' for close, open_val in zip(df_plot['Close'], df_plot['Open'])]
-                            fig.add_trace(
-                                go.Bar(x=df_plot.index, y=df_plot['Volume'], name="成交量", marker_color=volume_colors, opacity=0.7),
-                                row=2, col=1, secondary_y=False
-                            )
-                            # 20日成交量MA
-                            fig.add_trace(
-                                go.Scatter(x=df_plot.index, y=df_plot['Volume'].rolling(20).mean(), name="成交量 20MA", line=dict(color='#8c8c8c', width=1)),
-                                row=2, col=1, secondary_y=False
-                            )
-                            # VCP 價格波幅收縮率 (CV Ratio) (副座標軸)
-                            fig.add_trace(
-                                go.Scatter(x=df_plot.index, y=df_plot['CV_Ratio'], name="VCP 波動收縮比率 (CV Ratio)", line=dict(color='#13c2c2', width=2)),
-                                row=2, col=1, secondary_y=True
-                            )
-                            
-                            # 版面設定
-                            fig.update_layout(
-                                height=600,
-                                margin=dict(l=20, r=20, t=40, b=20),
-                                showlegend=True,
-                                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                                hovermode="x unified"
-                            )
-                            
-                            fig.update_yaxes(title_text="價格 / 均線", row=1, col=1, secondary_y=False)
-                            fig.update_yaxes(title_text="Alpha RS 分數", row=1, col=1, secondary_y=True)
-                            fig.update_yaxes(title_text="成交量", row=2, col=1, secondary_y=False)
-                            fig.update_yaxes(title_text="波動收縮比率 (%)", row=2, col=1, secondary_y=True)
-                            
-                            st.plotly_chart(fig, use_container_width=True)
 
         except Exception as e:
             st.error(f"數據錯誤: {e}")
