@@ -4,12 +4,18 @@ import numpy as np
 import yfinance as yf
 from datetime import datetime, timedelta
 import os
+import sys
 import re
 import requests
 from io import StringIO
 from concurrent.futures import ThreadPoolExecutor
 
 from bs4 import BeautifulSoup
+# 將當前檔案所在目錄加入 sys.path，防範 Streamlit Cloud 等部署環境找不到模組
+dir_path = os.path.dirname(os.path.abspath(__file__))
+if dir_path not in sys.path:
+    sys.path.insert(0, dir_path)
+
 from sepa_core import (
     clean_and_normalize,
     calculate_market_panic_days,
@@ -18,6 +24,7 @@ from sepa_core import (
     calculate_resilience,
     detect_vcp_signals
 )
+
 
 
 # 1. 網頁初始設定
