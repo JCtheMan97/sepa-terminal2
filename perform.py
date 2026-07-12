@@ -1449,8 +1449,11 @@ if submit_btn or st.session_state.first_run:
                     st.divider()
                     st.subheader("🏁 Mark Minervini 流派：雙軌交叉戰略部署")
 
-                    # 說明文字：依開關狀態而異
+                    # 說明文字：依開關狀態與大眾理解需要
                     desc_lines = []
+                    desc_lines.append(
+                        "⚡ <b>[RS: ±數字] (相對強度分數)</b>：代表個股對比大盤 (0050) 的加權超額動能指標（非個股持股報酬率）。正值且數值越大（例如 +98.5）代表跑贏大盤的幅度越強。"
+                    )
                     if show_fundamental:
                         desc_lines.append("🧪 <b>Code 33</b> = 連3季 EPS/營收/淨利率三加速&nbsp;｜&nbsp;🚀 <b>月營收</b> = 創12M新高 或 YoY連2月加速")
                         desc_lines.append(
@@ -1460,16 +1463,14 @@ if submit_btn or st.session_state.first_run:
                             "&nbsp;&nbsp;• <b>月營收爆發</b>：在季報公佈前，單月營收創 12 個月新高或 YoY 連續加速，是領先確認終端銷售動能爆發的即時信號。"
                         )
 
-                    if desc_lines:
-                        st.markdown(
-                            "<div style='background-color:#f6ffed; border:1px solid #b7eb8f; padding:12px; border-radius:8px; margin-bottom:15px;'>"
-                            "<span style='color:#389e0d; font-size:0.86em; line-height:1.6;'>"
-                            "💡 <b>指標徽章說明與馬克心法備註</b>（懸停可檢視詳細數據軌跡）：<br><br>" + "<br><br>".join(desc_lines) +
-                            "</span></div>",
-                            unsafe_allow_html=True
-                        )
-                    else:
-                        st.caption(f"💡 括號內為 50MA 乖離率(%)。右側標註為【後續 {holding_days} 日回測實際報酬率】。可在左側開啟「🔬 顯示基本面分析標籤」查看更多維度資訊。")
+                    st.markdown(
+                        "<div style='background-color:#f6ffed; border:1px solid #b7eb8f; padding:12px; border-radius:8px; margin-bottom:15px;'>"
+                        "<span style='color:#389e0d; font-size:0.86em; line-height:1.6;'>"
+                        "💡 <b>指標徽章說明與馬克心法備註</b>（可展開下方詳細數據軌跡）：<br><br>" + "<br><br>".join(desc_lines) +
+                        "</span></div>",
+                        unsafe_allow_html=True
+                    )
+                    st.caption(f"💡 括號內為 50MA 乖離率(%)。右側標註為【後續 {holding_days} 日回測實際報酬率】。可在左側開啟「🔬 顯示基本面分析標籤」查看更多維度資訊。")
 
                     true_leaders = df_final[(df_final["對比 0050 超額強度"] > 0) & (df_final["短線抗跌韌性分數"] >= dynamic_threshold)]
                     momentum_only = df_final[(df_final["對比 0050 超額強度"] > 0) & (df_final["短線抗跌韌性分數"] < dynamic_threshold)]
@@ -1511,11 +1512,11 @@ if submit_btn or st.session_state.first_run:
                             else:
                                 perf_str = ""
 
-                            # 主行：經典格式 ✅/❌ [RS: +X.X%] 股名 【動能狀態】 (50MA%) 🚨處置中 ▲報酬
+                            # 主行：經典格式 ✅/❌ [RS: +X.X] 股名 【動能狀態】 (50MA%) 🚨處置中 ▲報酬
                             status_str = row['動能狀態判定']
                             rs_val = row['對比 0050 超額強度']
                             main_line = (
-                                f"{row['趨勢模板']} <span style='color:#722ed1;font-weight:bold;font-size:0.92em;margin-right:4px;'>[RS:{rs_val:+.1f}%]</span>"
+                                f"{row['趨勢模板']} <span style='color:#722ed1;font-weight:bold;font-size:0.92em;margin-right:4px;'>[RS: {rs_val:+.1f}]</span>"
                                 f"<b>{row['原始名稱']}</b> "
                                 f"【{status_str}】 {bias_str}{disp_str}{perf_str}"
                             )
