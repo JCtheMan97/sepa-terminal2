@@ -21,12 +21,25 @@ st.set_page_config(page_title="🏆 SEPA 雙軌強勢股終端機", layout="wide
 # 2. 自動載入與動態初始化後台字典 (相容 UTF-8-sig)
 @st.cache_data
 def load_stock_dict():
+    import time
     stock_dict = {}
     dir_path = os.path.dirname(os.path.abspath(__file__))
     file_path = os.path.join(dir_path, "stocks_list.txt")
 
-    # 若檔案不存在或為空，自動自官方 API 抓取所有上市與上櫃股票代號
-    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+    # 檢查檔案是否已過期 (超過 30 天)
+    file_exists = os.path.exists(file_path)
+    is_outdated = False
+    if file_exists:
+        try:
+            file_mtime = os.path.getmtime(file_path)
+            # 30 天為 30 * 86400 秒
+            if time.time() - file_mtime > 30 * 86400:
+                is_outdated = True
+        except Exception:
+            pass
+
+    # 若檔案不存在、為空或已過期，自動自官方 API 抓取並覆蓋
+    if not file_exists or os.path.getsize(file_path) == 0 or is_outdated:
         try:
             # 1. 獲取上市公司 (TWSE)
             url_twse = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
@@ -49,13 +62,15 @@ def load_stock_dict():
                         stock_dict[f"{code}.TWO"] = name
 
             # 寫入 stocks_list.txt
-            with open(file_path, "w", encoding="utf-8-sig") as f:
-                for code, name in sorted(stock_dict.items()):
-                    f.write(f"{code},{name}\n")
+            if stock_dict:
+                with open(file_path, "w", encoding="utf-8-sig") as f:
+                    for code, name in sorted(stock_dict.items()):
+                        f.write(f"{code},{name}\n")
         except Exception as e:
             st.sidebar.error(f"自動初始化股票資料庫失敗: {e}")
 
     # 從檔案讀取
+    stock_dict = {}
     if os.path.exists(file_path):
         try:
             with open(file_path, "r", encoding="utf-8-sig") as f:
@@ -263,6 +278,7 @@ def get_finmind_token():
 def fetch_finmind_financials(stock_id, token):
     """獲取季度損益表數據 (首選 FinMind，失敗則自動以 yfinance 作為免費備援，支援重試與避退)"""
     import time
+    import random
     # 1. 嘗試 FinMind API (最多重試 2 次)
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
@@ -280,11 +296,11 @@ def fetch_finmind_financials(stock_id, token):
                 if data:
                     return data
             elif r.status_code in [402, 429]:
-                time.sleep(1.0)
+                time.sleep(1.0 + random.uniform(0.1, 0.5))
                 continue
         except (requests.exceptions.RequestException, Exception):
             if attempt < 1:
-                time.sleep(0.5)
+                time.sleep(0.5 + random.uniform(0.05, 0.2))
                 continue
 
     # 2. 備援機制：使用 yfinance 獲取季度財報數據 (免費且免 Token)
@@ -321,12 +337,14 @@ def fetch_finmind_financials(stock_id, token):
         except Exception:
             pass
 
-    return []
+    # 拋出異常以阻止 Streamlit 記錄失敗快取，防範 Failure Cache Poisoning
+    raise RuntimeError(f"Failed to fetch financials for {stock_id}")
 
 @st.cache_data(ttl=86400)
 def fetch_finmind_monthly_revenue(stock_id, token):
     """獲取月營收數據 (首選 FinMind，失敗則自動以 yfinance 季度營收近似，支援重試與避退)"""
     import time
+    import random
     # 1. 嘗試 FinMind API (最多重試 2 次)
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
@@ -344,11 +362,11 @@ def fetch_finmind_monthly_revenue(stock_id, token):
                 if data:
                     return data
             elif r.status_code in [402, 429]:
-                time.sleep(1.0)
+                time.sleep(1.0 + random.uniform(0.1, 0.5))
                 continue
         except (requests.exceptions.RequestException, Exception):
             if attempt < 1:
-                time.sleep(0.5)
+                time.sleep(0.5 + random.uniform(0.05, 0.2))
                 continue
 
     # 2. 備援：yfinance 季度營收轉月營收近似值
@@ -393,7 +411,8 @@ def fetch_finmind_monthly_revenue(stock_id, token):
                 return deduped
         except Exception:
             pass
-    return []
+    # 拋出異常以阻止 Streamlit 記錄失敗快取，防範 Failure Cache Poisoning
+    raise RuntimeError(f"Failed to fetch monthly revenue for {stock_id}")
 
 
 # --- 🧪 基本面運算核心邏輯 (支持歷史回溯時間軸過濾) ---
@@ -618,9 +637,16 @@ def get_single_stock_fundamentals(args):
     stock_id = ticker.split('.')[0]
     backtest_date_str = backtest_date.strftime('%Y-%m-%d')
 
-    # 1. 抓取數據 (使用 Cache / Fallback)
-    financials = fetch_finmind_financials(stock_id, token)
-    monthly_rev = fetch_finmind_monthly_revenue(stock_id, token)
+    # 1. 抓取數據 (使用 Cache / Fallback，若拋出異常則優雅降級為空清單，避免錯誤快取)
+    try:
+        financials = fetch_finmind_financials(stock_id, token)
+    except Exception:
+        financials = []
+
+    try:
+        monthly_rev = fetch_finmind_monthly_revenue(stock_id, token)
+    except Exception:
+        monthly_rev = []
 
     # 2. 計算基本面指標
     c33 = process_code33(financials, backtest_date_str)
