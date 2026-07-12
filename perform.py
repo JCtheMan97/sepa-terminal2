@@ -1511,10 +1511,12 @@ if submit_btn or st.session_state.first_run:
                             else:
                                 perf_str = ""
 
-                            # 主行：經典格式 ✅/❌ 股名 【動能狀態】 (50MA%) 🚨處置中 ▲報酬
+                            # 主行：經典格式 ✅/❌ [RS: +X.X%] 股名 【動能狀態】 (50MA%) 🚨處置中 ▲報酬
                             status_str = row['動能狀態判定']
+                            rs_val = row['對比 0050 超額強度']
                             main_line = (
-                                f"{row['趨勢模板']} <b>{row['原始名稱']}</b> "
+                                f"{row['趨勢模板']} <span style='color:#722ed1;font-weight:bold;font-size:0.92em;margin-right:4px;'>[RS:{rs_val:+.1f}%]</span>"
+                                f"<b>{row['原始名稱']}</b> "
                                 f"【{status_str}】 {bias_str}{disp_str}{perf_str}"
                             )
 
