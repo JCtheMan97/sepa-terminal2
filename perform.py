@@ -4,26 +4,13 @@ import numpy as np
 import yfinance as yf
 from datetime import datetime, timedelta
 import os
-import sys
 import re
 import requests
 from io import StringIO
 from concurrent.futures import ThreadPoolExecutor
 
 from bs4 import BeautifulSoup
-# 將當前檔案所在目錄加入 sys.path，防範 Streamlit Cloud 等部署環境找不到模組
-dir_path = os.path.dirname(os.path.abspath(__file__))
-if dir_path not in sys.path:
-    sys.path.insert(0, dir_path)
 
-from sepa_core import (
-    clean_and_normalize,
-    calculate_market_panic_days,
-    check_minervini_trend_template,
-    calculate_relative_strength,
-    calculate_resilience,
-    detect_vcp_signals
-)
 
 
 
@@ -622,7 +609,228 @@ def fetch_all_fundamentals(tickers, backtest_date):
     return results
 
 
-# --- 🧠 核心量化與動能運算輔助模組已移至 sepa_core.py ---
+# --- 🧠 核心量化與動能運算輔助模組 ---
+
+def clean_and_normalize(text):
+    """
+    清洗與標準化輸入字串，移除零寬度空白等隱形字元，並將全形字元轉換為半形。
+    """
+    # 移除零寬度空白等隱形字元
+    text = re.sub(r'[\u200b-\u200d\ufeff]', '', text)
+    # 將全角英數與空格轉換為半角
+    res = []
+    for char in text:
+        code = ord(char)
+        if code == 0x3000:
+            res.append(' ')
+        elif 0xFF01 <= code <= 0xFF5E:
+            res.append(chr(code - 0xfee0))
+        else:
+            res.append(char)
+    return "".join(res)
+
+def calculate_market_panic_days(b_c, start_date_short, market_threshold):
+    """
+    計算大盤恐慌日、恐慌日期清單、動態門檻以及大盤狀態描述。
+    """
+    b_short_df = pd.DataFrame(b_c.loc[start_date_short.strftime('%Y-%m-%d'):])
+    b_short_df.columns = ['Close_Price']
+    b_short_df['Market_Return'] = b_short_df['Close_Price'].pct_change() * 100
+    panic_days = b_short_df[b_short_df['Market_Return'] <= -market_threshold]
+    total_panic_days = len(panic_days)
+    panic_dates_list = panic_days.index.tolist()
+
+    dynamic_threshold = 55.0 if total_panic_days <= 5 else (70.0 if total_panic_days <= 15 else 80.0)
+    level_desc = "⚡ 極短線回檔（採取寬鬆防守標準，勝率過半即合格）" if total_panic_days <= 5 else ("⚖️ 標準波段修正（採取黃金 70% 機構防守標準）" if total_panic_days <= 15 else "🚨 空頭大屠殺 / 系統性風險（採取極嚴苛 80% 沙裡淘金標準）")
+    return b_short_df, panic_dates_list, total_panic_days, dynamic_threshold, level_desc
+
+def check_minervini_trend_template(s_series_raw):
+    """
+    檢測米奈爾維尼 (Mark Minervini) 的 7 大趨勢模板核心準則。
+    回傳: (is_trend_template, bias_50, cond5)
+    """
+    p_now = s_series_raw.iloc[-1]
+    if len(s_series_raw) >= 50:
+        ma50_val = s_series_raw.rolling(window=50).mean().iloc[-1]
+        bias_50 = ((p_now - ma50_val) / ma50_val) * 100
+    else:
+        bias_50 = 0.0
+
+    cond5 = False
+    is_trend_template = False
+
+    if len(s_series_raw) >= 200:
+        sma50_s = s_series_raw.rolling(50).mean()
+        sma150_s = s_series_raw.rolling(150).mean()
+        sma200_s = s_series_raw.rolling(200).mean()
+
+        m50 = sma50_s.iloc[-1]
+        m150 = sma150_s.iloc[-1]
+        m200 = sma200_s.iloc[-1]
+
+        m200_22 = sma200_s.iloc[-23] if len(sma200_s) >= 23 else np.nan
+
+        h252 = s_series_raw.iloc[-252:].max() if len(s_series_raw) >= 252 else s_series_raw.max()
+        l252 = s_series_raw.iloc[-252:].min() if len(s_series_raw) >= 252 else s_series_raw.min()
+
+        cond1 = (p_now > m150) and (p_now > m200)
+        cond2 = m150 > m200
+        cond3 = (m200 > m200_22) if not pd.isna(m200_22) else False
+        cond4 = (m50 > m150) and (m50 > m200)
+        cond5 = p_now > m50
+        cond6 = ((p_now / l252) - 1) * 100 >= 25 if l252 > 0 else False
+        cond7 = (1 - (p_now / h252)) * 100 <= 25 if h252 > 0 else False
+
+        is_trend_template = cond1 and cond2 and cond3 and cond4 and cond5 and cond6 and cond7
+
+    return is_trend_template, bias_50, cond5
+
+def calculate_relative_strength(s_series_raw, b_c_all):
+    """
+    計算個股相對強度 (RS) 指標與 IBD 絕對/相對強度分數。
+    回傳: (ibd, rel_strength_0050, is_rs_recovering, rel_alpha_rs_series, abs_rs_series)
+    """
+    if len(s_series_raw) >= 253:
+        s_3m = s_series_raw.shift(63)
+        s_6m = s_series_raw.shift(126)
+        s_9m = s_series_raw.shift(189)
+        s_1y = s_series_raw.shift(252)
+        abs_rs_series = ((s_series_raw/s_3m*2) + (s_series_raw/s_6m) + (s_series_raw/s_9m) + (s_series_raw/s_1y)) / 5 * 100
+        ibd = abs_rs_series.iloc[-1]
+
+        # 對 0050 相對 RS 動能
+        b_c_aligned_to_stock = b_c_all.reindex(s_series_raw.index).ffill()
+        rel_val = s_series_raw / b_c_aligned_to_stock
+        rel_3m = rel_val.shift(63)
+        rel_6m = rel_val.shift(126)
+        rel_9m = rel_val.shift(189)
+        rel_1y = rel_val.shift(252)
+        rel_alpha_rs_series = ((rel_val/rel_3m*2) + (rel_val/rel_6m) + (rel_val/rel_9m) + (rel_val/rel_1y)) / 5 * 100
+
+        rel_alpha_rs_now = rel_alpha_rs_series.iloc[-1]
+        alpha_sma5_now = rel_alpha_rs_series.rolling(5).mean().iloc[-1]
+        is_rs_recovering = rel_alpha_rs_series.iloc[-1] > rel_alpha_rs_series.iloc[-2] and rel_alpha_rs_series.iloc[-1] > alpha_sma5_now
+
+        rel_strength_0050 = rel_alpha_rs_now - 100
+    else:
+        ibd = 0.0
+        rel_strength_0050 = 0.0
+        is_rs_recovering = False
+        rel_alpha_rs_series = pd.Series(index=s_series_raw.index, dtype=float)
+        abs_rs_series = pd.Series(index=s_series_raw.index, dtype=float)
+
+    return ibd, rel_strength_0050, is_rs_recovering, rel_alpha_rs_series, abs_rs_series
+
+def calculate_resilience(s_series_raw, panic_dates_list, b_short_df, total_panic_days):
+    """
+    計算個股在市場恐慌日的抗跌韌性得分。
+    修正新股分母偏差：動態計算個股實際有交易資料的恐慌天數作為分母。
+    """
+    s_ret = s_series_raw.pct_change() * 100
+    if total_panic_days > 0:
+        # 僅在個股有交易日期的恐慌日中進行比對
+        valid_panic_dates = [d for d in panic_dates_list if d in s_ret.index and d in b_short_df.index]
+        if valid_panic_dates:
+            outperform = np.sum(s_ret.loc[valid_panic_dates] > b_short_df.loc[valid_panic_dates, 'Market_Return'])
+            resilience = (outperform / len(valid_panic_dates) * 100)
+        else:
+            outperform = 0
+            resilience = 100.0  # 若無有效交易數據，預設為 100.0
+    else:
+        outperform = 0
+        resilience = 100.0
+    return resilience, outperform, s_ret
+
+def detect_vcp_signals(s_series_raw, df_all, df_vol, ticker, cond5, rel_alpha_rs_series, abs_rs_series, is_rs_recovering):
+    """
+    計算 VCP 動態波幅與成交量收縮信號。
+    回傳: vcp_status_final (含雙軌領先/背離前綴與最終 VCP 狀態)
+    """
+    is_price_new_high = False
+    is_alpha_new_high = False
+    is_abs_rs_new_high = False
+    is_alpha_lagging = False
+    is_abs_rs_lagging = False
+
+    is_vcp_80 = False
+    is_vcp_90 = False
+    is_quiet_platform = False
+
+    p_now = s_series_raw.iloc[-1]
+
+    if len(s_series_raw) >= 253:
+        is_price_new_high = p_now >= s_series_raw.iloc[-31:-1].max()
+        is_alpha_new_high = rel_alpha_rs_series.iloc[-1] >= rel_alpha_rs_series.iloc[-31:-1].max()
+        is_abs_rs_new_high = abs_rs_series.iloc[-1] >= abs_rs_series.iloc[-31:-1].max()
+
+        is_alpha_lagging = rel_alpha_rs_series.iloc[-1] < rel_alpha_rs_series.iloc[-31:-1].max()
+        is_abs_rs_lagging = abs_rs_series.iloc[-1] < abs_rs_series.iloc[-31:-1].max()
+
+        # 1. ATR 與價格壓縮比例 (a_ratio)
+        high_s = df_all['High'][ticker].reindex(s_series_raw.index).ffill()
+        low_s = df_all['Low'][ticker].reindex(s_series_raw.index).ffill()
+        close_prev = s_series_raw.shift(1)
+        tr = pd.concat([
+            high_s - low_s,
+            (high_s - close_prev).abs(),
+            (low_s - close_prev).abs()
+        ], axis=1).max(axis=1)
+
+        atr_5 = tr.rolling(5).mean().iloc[-1]
+        atr_10_ma = tr.rolling(10).mean().rolling(10).mean().iloc[-1]
+        atr_20_ma = tr.rolling(20).mean().rolling(20).mean().iloc[-1]
+
+        a_ratio_10 = atr_5 / atr_10_ma if atr_10_ma > 0 else 1.0
+        a_ratio_20 = atr_5 / atr_20_ma if atr_20_ma > 0 else 1.0
+
+        # 2. Volume 縮小比例 (v_ratio)
+        s_vol = df_vol[ticker].dropna().reindex(s_series_raw.index).ffill()
+        vol_5 = s_vol.rolling(5).mean().iloc[-1]
+        vol_10 = s_vol.rolling(10).mean().iloc[-1]
+        vol_20 = s_vol.rolling(20).mean().iloc[-1]
+
+        v_ratio_10 = vol_5 / vol_10 if vol_10 > 0 else 1.0
+        v_ratio_20 = vol_5 / vol_20 if vol_20 > 0 else 1.0
+
+        # 3. 波動率緊縮
+        roll_std5 = s_series_raw.rolling(5).std(ddof=0)
+        roll_mean5 = s_series_raw.rolling(5).mean()
+        cv_5 = roll_std5 / roll_mean5
+        cv_5_ma20 = cv_5.rolling(20).mean().iloc[-1]
+        cv_5_now = cv_5.iloc[-1]
+        is_tight_cv = cv_5_now < cv_5_ma20
+
+        # VCP 狀態判斷 (對齊 TradingView 邏輯)
+        is_vcp_80 = (a_ratio_20 < 0.8 or a_ratio_10 < 0.8) and (v_ratio_20 < 0.85 or v_ratio_10 < 0.85) and cond5 and is_tight_cv
+        is_vcp_90 = (a_ratio_20 < 0.9 or a_ratio_10 < 0.9) and (v_ratio_20 < 0.95 or v_ratio_10 < 0.95) and cond5 and is_tight_cv
+        is_quiet_platform = s_vol.rolling(3).mean().iloc[-1] < vol_20 * 0.7 and is_tight_cv
+
+    is_div_warning = is_price_new_high and (is_alpha_lagging or is_abs_rs_lagging)
+    is_abs_leading = (not is_price_new_high) and is_abs_rs_new_high
+    is_alpha_leading = (not is_price_new_high) and is_alpha_new_high
+
+    if is_vcp_80:
+        struct_status = "💎 極致壓縮(80%+CV)"
+    elif is_quiet_platform:
+        struct_status = "💤 Dead Quiet"
+    elif is_vcp_90:
+        struct_status = "🔥 相對壓縮(90%+CV)"
+    elif is_rs_recovering:
+        struct_status = "📈 動能回復中"
+    else:
+        struct_status = "⏳ 區間整理"
+
+    lead_prefix = ""
+    if is_alpha_leading and is_abs_leading:
+        lead_prefix = "🌟 雙軌領先 | "
+    elif is_alpha_leading:
+        lead_prefix = "🌟 Alpha領先 | "
+    elif is_abs_leading:
+        lead_prefix = "🌟 RS領先 | "
+    elif is_div_warning:
+        lead_prefix = "⚠️ 雙軌背離 | "
+
+    return lead_prefix + struct_status
 
 # --- 🎯 網頁標題與馬克心法區塊 ---
 st.title("🏆 SEPA 技術面篩選模組 - 雙軌相對強度決策終端機")
@@ -775,7 +983,7 @@ with st.sidebar.expander("🔌 數據引擎與資料時間診斷", expanded=True
         st.write(status)
 
 
-# --- clean_and_normalize 已移至 sepa_core.py ---
+# --- clean_and_normalize 已合併回主程式 ---
 
 
 def get_stocks_pool(text):
