@@ -19,7 +19,8 @@ st.set_page_config(page_title="🏆 SEPA 雙軌強勢股終端機", layout="wide
 @st.cache_data
 def load_stock_dict():
     stock_dict = {}
-    file_path = "stocks_list.txt"
+    dir_path = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(dir_path, "stocks_list.txt")
 
     # 若檔案不存在或為空，自動自官方 API 抓取所有上市與上櫃股票代號
     if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
@@ -956,12 +957,31 @@ with st.sidebar.expander("🔌 數據引擎與資料時間診斷", expanded=True
         st.write(status)
 
 
+def clean_and_normalize(text):
+    # 移除零寬度空白等隱形字元
+    text = re.sub(r'[\u200b-\u200d\ufeff]', '', text)
+    # 將全角英數與空格轉換為半角
+    res = []
+    for char in text:
+        code = ord(char)
+        if code == 0x3000:
+            res.append(' ')
+        elif 0xFF01 <= code <= 0xFF5E:
+            res.append(chr(code - 0xfee0))
+        else:
+            res.append(char)
+    return "".join(res)
+
+
 def get_stocks_pool(text):
     """智能掃描器：自動分割並比對輸入文字與 STOCK_DICT 名稱，支援多種分隔符號並防範模糊比對誤判"""
     pool = []
 
+    # 先清理與標準化輸入字串 (如去除手機輸入可能產生的全角字元或零寬度空白)
+    cleaned_text = clean_and_normalize(text)
+
     # 支援新行、半角逗號、全角逗號、空格、分號等分隔符
-    tokens = re.split(r'[\n\r,，;；\s\t]+', text)
+    tokens = re.split(r'[\n\r,，;；\s\t]+', cleaned_text)
 
     for token in tokens:
         token = token.strip()
