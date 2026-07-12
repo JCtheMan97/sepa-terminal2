@@ -145,7 +145,10 @@ def _format_disposition_period(period_str):
             match = re.search(r'(\d{3,4})[/\.年]\s*(\d{1,2})[/\.月]\s*(\d{1,2})', p)
             if match:
                 y, m, d = match.groups()
-                formatted.append(f"{int(y) + 1911}/{int(m):02d}/{int(d):02d}")
+                year_val = int(y)
+                if year_val < 1911:
+                    year_val += 1911
+                formatted.append(f"{year_val}/{int(m):02d}/{int(d):02d}")
         if formatted:
             return " ~ ".join(formatted)
         return cleaned
