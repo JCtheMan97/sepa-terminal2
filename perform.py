@@ -90,11 +90,14 @@ STOCK_DICT = load_stock_dict()
 @st.cache_data(ttl=3600)  # 快取1小時，避免重複下載單一股票
 def fetch_single_ticker_data(ticker, start_date, end_date):
     """下載單一股票歷史資料並快取"""
-    try:
-        df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=True)
-        return df
-    except Exception:
-        return pd.DataFrame()
+    import time
+    import random
+    # 隨機微秒延遲防範高併發被 Yahoo Block
+    time.sleep(random.uniform(0.02, 0.1))
+    df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=True)
+    if df.empty:
+        raise RuntimeError(f"No data fetched for {ticker}")
+    return df
 
 def fetch_and_sync_data(tickers, start_date, end_date):
     """併發下載股票歷史資料，並以單股級別快取"""
