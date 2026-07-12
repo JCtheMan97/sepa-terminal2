@@ -47,7 +47,7 @@ pip install -r requirements.txt
 ### 2. 啟動選股終端機
 執行以下指令，系統會自動在瀏覽器打開網頁介面：
 ```bash
-streamlit run app.py
+streamlit run perform.py
 ```
 啟動後會自動開啟 `http://localhost:8501`。
 
