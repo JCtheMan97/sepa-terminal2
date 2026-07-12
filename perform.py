@@ -72,10 +72,44 @@ def load_stock_dict():
 STOCK_DICT = load_stock_dict()
 
 # --- 🎯 快取下載與運算引擎 ---
-@st.cache_data(ttl=3600)  # 快取1小時，避免重複請求
+@st.cache_data(ttl=3600)  # 快取1小時，避免重複下載單一股票
+def fetch_single_ticker_data(ticker, start_date, end_date):
+    """下載單一股票歷史資料並快取"""
+    try:
+        df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=True)
+        return df
+    except Exception:
+        return pd.DataFrame()
+
 def fetch_and_sync_data(tickers, start_date, end_date):
-    """將 yfinance 下載與基本資料同步邏輯獨立並進行快取"""
-    df_all = yf.download(tickers, start=start_date, end=end_date, progress=False, auto_adjust=True)
+    """併發下載股票歷史資料，並以單股級別快取"""
+    results = {}
+    # 使用多線程併發下載
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(fetch_single_ticker_data, t, start_date, end_date): t for t in tickers}
+        for future in futures:
+            t = futures[future]
+            try:
+                df = future.result()
+                if not df.empty:
+                    results[t] = df
+            except Exception:
+                pass
+
+    if not results:
+        return pd.DataFrame()
+
+    # 重組為與原 yf.download 一致的 MultiIndex (Metric, Ticker) 格式
+    combined_dfs = []
+    for t, df in results.items():
+        if isinstance(df.columns, pd.MultiIndex):
+            df_temp = df.copy()
+        else:
+            df_temp = df.copy()
+            df_temp.columns = pd.MultiIndex.from_product([df_temp.columns, [t]])
+        combined_dfs.append(df_temp)
+
+    df_all = pd.concat(combined_dfs, axis=1)
     return df_all
 
 # --- 🆕 優化版：處置股查詢引擎 (上市 TWSE + 上櫃 TPEx) ---
@@ -1062,6 +1096,7 @@ def get_stocks_pool(text):
 
     return unique_pool
 
+@st.cache_data(ttl=600)
 def fetch_official_latest_prices(latest_date):
     """
     從證交所(MI_INDEX)與櫃買中心官方 OpenAPI 下載指定日期的最精確收盤價與成交量，
