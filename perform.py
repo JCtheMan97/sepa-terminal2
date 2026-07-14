@@ -15,7 +15,49 @@ from bs4 import BeautifulSoup
 
 
 # 1. 網頁初始設定
-st.set_page_config(page_title="🏆 SEPA 雙軌強勢股終端機", layout="wide")
+st.set_page_config(page_title="🏆 SEPA 雙軌強勢股決策終端機", layout="wide")
+
+# 🏁 在側邊欄最頂端動態加載加權與櫃買指標趨勢
+@st.cache_data(ttl=1800)
+def fetch_market_indices(backtest_date_str):
+    import yfinance as yf
+    from datetime import datetime, timedelta
+    import pandas as pd
+    import numpy as np
+    
+    try:
+        target_date = datetime.strptime(backtest_date_str, '%Y-%m-%d')
+    except Exception:
+        target_date = datetime.today()
+        
+    start_date = target_date - timedelta(days=250)
+    
+    try:
+        # 下載 0050.TW 與 006201.TWO (元大富櫃50)
+        df = yf.download(["0050.TW", "006201.TWO"], start=start_date.strftime('%Y-%m-%d'), end=(target_date + timedelta(days=1)).strftime('%Y-%m-%d'), progress=False, auto_adjust=True)
+        if df.empty:
+            return {}
+        df_close = df['Close']
+        
+        # 0050 趨勢
+        p_0050 = df_close['0050.TW'].dropna()
+        p_50 = p_0050.iloc[-1] if not p_0050.empty else np.nan
+        m50_50 = p_0050.rolling(50).mean().iloc[-1] if len(p_0050) >= 50 else np.nan
+        
+        # 006201 趨勢
+        p_two_series = df_close['006201.TWO'].dropna() if '006201.TWO' in df_close.columns else pd.Series()
+        p_two = p_two_series.iloc[-1] if not p_two_series.empty else np.nan
+        m50_two = p_two_series.rolling(50).mean().iloc[-1] if len(p_two_series) >= 50 else np.nan
+        
+        return {
+            "price_0050": p_50,
+            "ma50_0050": m50_50,
+            "price_two": p_two,
+            "ma50_two": m50_two,
+            "date_now": p_0050.index[-1].strftime('%Y-%m-%d') if not p_0050.empty else target_date.strftime('%Y-%m-%d')
+        }
+    except Exception:
+        return {}
 
 
 # 2. 自動載入與動態初始化後台字典 (相容 UTF-8-sig)
@@ -915,6 +957,72 @@ with st.expander("📖 閱讀 SEPA 系統核心心法 (Trade Like a Stock Market
     3. 大盤的跌勢，是在幫這些強勢股清洗浮額（Weak hands），並讓其完美的 VCP（波動率收縮型態） 成型。
     """)
 
+# --- 🏁 市場多空溫度計與趨勢濾網 (無條件加載，置於最頂端) ---
+if "backtest_date_key" in st.session_state:
+    target_date_val = st.session_state.backtest_date_key
+else:
+    target_date_val = datetime.today().date()
+
+# 轉換為日期字串以利於快取鍵值
+target_date_str = target_date_val.strftime('%Y-%m-%d') if hasattr(target_date_val, 'strftime') else str(target_date_val)
+
+info_indices = fetch_market_indices(target_date_str)
+if info_indices:
+    p_50 = info_indices["price_0050"]
+    m50_50 = info_indices["ma50_0050"]
+    
+    if pd.notna(p_50) and pd.notna(m50_50):
+        if p_50 >= m50_50:
+            status_50 = "🟢 偏多格局"
+            color_50 = "#52c41a"
+        else:
+            status_50 = "🔴 偏空格局"
+            color_50 = "#f5222d"
+    else:
+        status_50, color_50 = "N/A", "#8c8c8c"
+        
+    p_two = info_indices["price_two"]
+    m50_two = info_indices["ma50_two"]
+    
+    if pd.notna(p_two) and pd.notna(m50_two):
+        if p_two >= m50_two:
+            status_two = "🟢 偏多格局"
+            color_two = "#52c41a"
+        else:
+            status_two = "🔴 偏空格局"
+            color_two = "#f5222d"
+    else:
+        status_two, color_two = "N/A", "#8c8c8c"
+        
+    st.sidebar.markdown(f"""
+    <div style="background-color:rgba(128,128,128,0.05); border:1px solid rgba(128,128,128,0.15); padding:12px; border-radius:8px; margin-bottom:15px; margin-top: 10px;">
+        <span style="font-size:0.92em; font-weight:bold;">🏁 市場多空溫度計 ({info_indices['date_now']})</span><br><br>
+        <div style="display:flex; justify-content:space-between; margin-bottom:6px; font-size:0.86em;">
+            <span>📈 上市加權 (0050)</span>
+            <span style="color:{color_50}; font-weight:bold;">{status_50}</span>
+        </div>
+        <div style="display:flex; justify-content:space-between; margin-bottom:10px; font-size:0.86em;">
+            <span>📉 中小櫃買 (富櫃50)</span>
+            <span style="color:{color_two}; font-weight:bold;">{status_two}</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    if status_two == "🔴 偏空格局":
+        st.sidebar.markdown(f"""
+        <div style="background-color:#fff2f0; border:1px solid #ffccc7; padding:10px; border-radius:6px; margin-bottom:15px;">
+            <span style="color:#cf1322; font-size:0.82em; line-height:1.5; font-weight:bold;">
+                ⚠️ 櫃買警訊：<br>
+                目前中小型股大盤 (富櫃50) 趨勢偏弱。受整體氣氛 Beta 拖累，中小型股回檔壓力巨大。即使個股處於第一/二象限，仍建議：<br>
+                • 嚴格收緊防守停損線<br>
+                • 大幅降低中小型股持股成數<br>
+                • 提高現金水位，耐心等待指數落底。
+            </span>
+        </div>
+        """, unsafe_allow_html=True)
+
+st.sidebar.markdown("---")
+
 # --- ⚙️ 側邊欄控制面板 ---
 with st.sidebar.form("sepa_integrated_form"):
     st.header("⚙️ 雙軌指標參數設定")
@@ -934,71 +1042,11 @@ with st.sidebar.form("sepa_integrated_form"):
     show_fundamental = st.checkbox("🔬 顯示基本面分析標籤", value=False, help="開啟後，下方象限列表個股名稱下方將顯示 Code 33 與 月營收之詳細徽章")
 
     st.subheader("【🕒 歷史回溯與績效回測】")
-    backtest_date = st.date_input("選擇回溯基準日 (以此日視為當時的今天)", value=datetime.today())
+    backtest_date = st.date_input("選擇回溯基準日 (以此日視為當時的今天)", value=datetime.today(), key="backtest_date_key")
     holding_days = st.number_input("回溯後預計持有天數 (交易日)", min_value=1, max_value=120, value=20, step=1)
 
     is_backtesting = backtest_date < datetime.today().date()
     submit_btn = st.form_submit_button("🚀 執行雙軌交叉選股分析")
-
-# --- 🏁 市場多空溫度計與趨勢濾網 ---
-st.sidebar.markdown("---")
-if "market_trend_info" in st.session_state and st.session_state.market_trend_info:
-    info = st.session_state.market_trend_info
-    
-    # 判斷上市加權趨勢 (0050)
-    p_50 = info["price_0050"]
-    m50_50 = info["ma50_0050"]
-    
-    if pd.notna(p_50) and pd.notna(m50_50):
-        if p_50 >= m50_50:
-            status_50 = "🟢 偏多格局"
-            color_50 = "#52c41a"
-        else:
-            status_50 = "🔴 偏空格局"
-            color_50 = "#f5222d"
-    else:
-        status_50, color_50 = "N/A", "#8c8c8c"
-        
-    # 判斷上櫃櫃買趨勢 (^TWO)
-    p_two = info["price_two"]
-    m50_two = info["ma50_two"]
-    
-    if pd.notna(p_two) and pd.notna(m50_two):
-        if p_two >= m50_two:
-            status_two = "🟢 偏多格局"
-            color_two = "#52c41a"
-        else:
-            status_two = "🔴 偏空格局"
-            color_two = "#f5222d"
-    else:
-        status_two, color_two = "N/A", "#8c8c8c"
-        
-    st.sidebar.markdown(f"""
-    <div style="background-color:rgba(128,128,128,0.05); border:1px solid rgba(128,128,128,0.15); padding:12px; border-radius:8px; margin-bottom:15px;">
-        <span style="font-size:0.92em; font-weight:bold;">🏁 市場多空溫度計 ({info['date_now']})</span><br><br>
-        <div style="display:flex; justify-content:space-between; margin-bottom:6px; font-size:0.86em;">
-            <span>📈 上市加權 (0050)</span>
-            <span style="color:{color_50}; font-weight:bold;">{status_50}</span>
-        </div>
-        <div style="display:flex; justify-content:space-between; margin-bottom:10px; font-size:0.86em;">
-            <span>📉 中小櫃買 (TPEx)</span>
-            <span style="color:{color_two}; font-weight:bold;">{status_two}</span>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    if status_two == "🔴 偏空格局":
-        st.sidebar.markdown(f"""
-        <div style="background-color:#fff2f0; border:1px solid #ffccc7; padding:10px; border-radius:6px; margin-bottom:15px;">
-            <span style="color:#cf1322; font-size:0.82em; line-height:1.5; font-weight:bold;">
-                ⚠️ 櫃買警訊：<br>
-                目前中小型股大盤 (TPEx) 趨勢偏弱。受整體氣氛 Beta 拖累，中小型股回檔壓力巨大。即使個股處於第一/二象限，仍建議：<br>
-                • 嚴格收緊防守停損線<br>
-                • 大幅降低中小型股持股成數<br>
-                • 提高現金水位，耐心等待指數落底。
-            </span>
-        </div>
-        """, unsafe_allow_html=True)
 
 # --- 🔌 API 連線與資料時間診斷 ---
 st.sidebar.markdown("---")
@@ -1285,7 +1333,7 @@ if submit_btn or st.session_state.first_run:
             if not STOCKS_POOL:
                 st.error("❌ 過濾雜訊後，未偵測到任何有效的股票代號，請重新輸入。")
             else:
-                all_tickers = ["0050.TW", "^TWO"] + [stock["id"] for stock in STOCKS_POOL]
+                all_tickers = ["0050.TW"] + [stock["id"] for stock in STOCKS_POOL]
 
                 download_end_date = real_today + timedelta(days=1)
                 df_all = fetch_and_sync_data(tuple(all_tickers), start_date_long.strftime('%Y-%m-%d'), download_end_date.strftime('%Y-%m-%d'))
@@ -1328,27 +1376,6 @@ if submit_btn or st.session_state.first_run:
                 else:
                     idx_now = b_c.index[-1]
                     loc_now = b_c_all.index.get_loc(idx_now)
-
-                    # 計算加權與櫃買指數趨勢，存入 session_state 供側邊欄渲染
-                    p_0050_val = b_c.iloc[-1]
-                    ma50_0050_val = b_c.rolling(50).mean().iloc[-1] if len(b_c) >= 50 else np.nan
-                    
-                    p_two_val = np.nan
-                    ma50_two_val = np.nan
-                    if "^TWO" in df_adj.columns:
-                        b_c_all_two = df_adj["^TWO"].dropna()
-                        b_c_two_aligned = b_c_all_two.loc[:idx_now]
-                        if not b_c_two_aligned.empty:
-                            p_two_val = b_c_two_aligned.iloc[-1]
-                            ma50_two_val = b_c_two_aligned.rolling(50).mean().iloc[-1] if len(b_c_two_aligned) >= 50 else np.nan
-                            
-                    st.session_state.market_trend_info = {
-                        "price_0050": p_0050_val,
-                        "ma50_0050": ma50_0050_val,
-                        "price_two": p_two_val,
-                        "ma50_two": ma50_two_val,
-                        "date_now": idx_now.strftime('%Y-%m-%d')
-                    }
 
                     if loc_now + holding_days < len(b_c_all):
                         idx_future = b_c_all.index[loc_now + holding_days]
