@@ -920,9 +920,9 @@ with st.sidebar.form("sepa_integrated_form"):
     st.header("⚙️ 雙軌指標參數設定")
 
     default_pool = (
-        "2337.TW,旺宏\n3033.TW,威健\n3550.TW,聯穎\n6187.TWO,萬潤\n3037.TW,欣興\n3017.TW,奇鋐\n"
+        "2337.TW,旺宏\n8016.TW,矽創\n3550.TW,聯穎\n6187.TWO,萬潤\n3037.TW,欣興\n3017.TW,奇鋐\n"
         "2478.TW,大毅\n4749.TWO,新應材\n3680.TWO,家登\n8021.TW,尖點\n3481.TW,群創\n"
-        "8438.TW,昶昕\n8016.TW,矽創\n2423.TW,固緯\n8147.TWO,正淩\n8028.TW,昇陽半導體\n6716.TWO,應廣\n2428.TW,興勤\n5284.TW,JPP-KY\n"
+        "8438.TW,昶昕\n3033.TW,威健\n2423.TW,固緯\n8147.TWO,正淩\n8028.TW,昇陽半導體\n6716.TWO,應廣\n2428.TW,興勤\n5284.TW,JPP-KY\n"
         "2493.TW,揚博\n3023.TW,信邦\n6672.TW,騰輝電子\n3044.TW,健鼎\n3022.TW,威強電\n3577.TWO,泓格\n3305.TW,昇貿"
     )
     stock_input = st.text_area("股票清單 (支援複製貼上！系統會自動過濾國籍、財報等非代號雜訊)", value=default_pool, height=300)
@@ -939,6 +939,66 @@ with st.sidebar.form("sepa_integrated_form"):
 
     is_backtesting = backtest_date < datetime.today().date()
     submit_btn = st.form_submit_button("🚀 執行雙軌交叉選股分析")
+
+# --- 🏁 市場多空溫度計與趨勢濾網 ---
+st.sidebar.markdown("---")
+if "market_trend_info" in st.session_state and st.session_state.market_trend_info:
+    info = st.session_state.market_trend_info
+    
+    # 判斷上市加權趨勢 (0050)
+    p_50 = info["price_0050"]
+    m50_50 = info["ma50_0050"]
+    
+    if pd.notna(p_50) and pd.notna(m50_50):
+        if p_50 >= m50_50:
+            status_50 = "🟢 偏多格局"
+            color_50 = "#52c41a"
+        else:
+            status_50 = "🔴 偏空格局"
+            color_50 = "#f5222d"
+    else:
+        status_50, color_50 = "N/A", "#8c8c8c"
+        
+    # 判斷上櫃櫃買趨勢 (^TWO)
+    p_two = info["price_two"]
+    m50_two = info["ma50_two"]
+    
+    if pd.notna(p_two) and pd.notna(m50_two):
+        if p_two >= m50_two:
+            status_two = "🟢 偏多格局"
+            color_two = "#52c41a"
+        else:
+            status_two = "🔴 偏空格局"
+            color_two = "#f5222d"
+    else:
+        status_two, color_two = "N/A", "#8c8c8c"
+        
+    st.sidebar.markdown(f"""
+    <div style="background-color:rgba(128,128,128,0.05); border:1px solid rgba(128,128,128,0.15); padding:12px; border-radius:8px; margin-bottom:15px;">
+        <span style="font-size:0.92em; font-weight:bold;">🏁 市場多空溫度計 ({info['date_now']})</span><br><br>
+        <div style="display:flex; justify-content:space-between; margin-bottom:6px; font-size:0.86em;">
+            <span>📈 上市加權 (0050)</span>
+            <span style="color:{color_50}; font-weight:bold;">{status_50}</span>
+        </div>
+        <div style="display:flex; justify-content:space-between; margin-bottom:10px; font-size:0.86em;">
+            <span>📉 中小櫃買 (TPEx)</span>
+            <span style="color:{color_two}; font-weight:bold;">{status_two}</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    if status_two == "🔴 偏空格局":
+        st.sidebar.markdown(f"""
+        <div style="background-color:#fff2f0; border:1px solid #ffccc7; padding:10px; border-radius:6px; margin-bottom:15px;">
+            <span style="color:#cf1322; font-size:0.82em; line-height:1.5; font-weight:bold;">
+                ⚠️ 櫃買警訊：<br>
+                目前中小型股大盤 (TPEx) 趨勢偏弱。受整體氣氛 Beta 拖累，中小型股回檔壓力巨大。即使個股處於第一/二象限，仍建議：<br>
+                • 嚴格收緊防守停損線<br>
+                • 大幅降低中小型股持股成數<br>
+                • 提高現金水位，耐心等待指數落底。
+            </span>
+        </div>
+        """, unsafe_allow_html=True)
 
 # --- 🔌 API 連線與資料時間診斷 ---
 st.sidebar.markdown("---")
@@ -1225,7 +1285,7 @@ if submit_btn or st.session_state.first_run:
             if not STOCKS_POOL:
                 st.error("❌ 過濾雜訊後，未偵測到任何有效的股票代號，請重新輸入。")
             else:
-                all_tickers = ["0050.TW"] + [stock["id"] for stock in STOCKS_POOL]
+                all_tickers = ["0050.TW", "^TWO"] + [stock["id"] for stock in STOCKS_POOL]
 
                 download_end_date = real_today + timedelta(days=1)
                 df_all = fetch_and_sync_data(tuple(all_tickers), start_date_long.strftime('%Y-%m-%d'), download_end_date.strftime('%Y-%m-%d'))
@@ -1268,6 +1328,27 @@ if submit_btn or st.session_state.first_run:
                 else:
                     idx_now = b_c.index[-1]
                     loc_now = b_c_all.index.get_loc(idx_now)
+
+                    # 計算加權與櫃買指數趨勢，存入 session_state 供側邊欄渲染
+                    p_0050_val = b_c.iloc[-1]
+                    ma50_0050_val = b_c.rolling(50).mean().iloc[-1] if len(b_c) >= 50 else np.nan
+                    
+                    p_two_val = np.nan
+                    ma50_two_val = np.nan
+                    if "^TWO" in df_adj.columns:
+                        b_c_all_two = df_adj["^TWO"].dropna()
+                        b_c_two_aligned = b_c_all_two.loc[:idx_now]
+                        if not b_c_two_aligned.empty:
+                            p_two_val = b_c_two_aligned.iloc[-1]
+                            ma50_two_val = b_c_two_aligned.rolling(50).mean().iloc[-1] if len(b_c_two_aligned) >= 50 else np.nan
+                            
+                    st.session_state.market_trend_info = {
+                        "price_0050": p_0050_val,
+                        "ma50_0050": ma50_0050_val,
+                        "price_two": p_two_val,
+                        "ma50_two": ma50_two_val,
+                        "date_now": idx_now.strftime('%Y-%m-%d')
+                    }
 
                     if loc_now + holding_days < len(b_c_all):
                         idx_future = b_c_all.index[loc_now + holding_days]
