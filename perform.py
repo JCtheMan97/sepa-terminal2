@@ -1008,12 +1008,25 @@ if info_indices:
     </div>
     """, unsafe_allow_html=True)
     
+    if status_50 == "🔴 偏空格局":
+        st.sidebar.markdown(f"""
+        <div style="background-color:#fff2f0; border:1px solid #ffccc7; padding:10px; border-radius:6px; margin-bottom:12px;">
+            <span style="color:#cf1322; font-size:0.82em; line-height:1.5; font-weight:bold;">
+                ⚠️ 大盤警訊：<br>
+                加權大盤 (0050) 趨勢偏空。全市場權值股與主流股承受系統性重力拉扯：<br>
+                • 嚴格限制所有新建倉，避免接刀<br>
+                • 全面檢視持股，觸及停損果斷執行<br>
+                • 建議保留極高現金比例，靜待大盤止跌築底。
+            </span>
+        </div>
+        """, unsafe_allow_html=True)
+
     if status_two == "🔴 偏空格局":
         st.sidebar.markdown(f"""
         <div style="background-color:#fff2f0; border:1px solid #ffccc7; padding:10px; border-radius:6px; margin-bottom:15px;">
             <span style="color:#cf1322; font-size:0.82em; line-height:1.5; font-weight:bold;">
                 ⚠️ 櫃買警訊：<br>
-                目前中小型股大盤 (富櫃50) 趨勢偏弱。受整體氣氛 Beta 拖累，中小型股回檔壓力巨大。即使個股處於第一/二象限，仍建議：<br>
+                中小型股大盤 (富櫃50) 趨勢偏空。中小型股回檔壓力巨大，即使持股處於第一/二象限，仍建議：<br>
                 • 嚴格收緊防守停損線<br>
                 • 大幅降低中小型股持股成數<br>
                 • 提高現金水位，耐心等待指數落底。
