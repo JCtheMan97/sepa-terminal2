@@ -36,19 +36,38 @@ def fetch_market_indices(backtest_date_str):
         # 下載 0050.TW 與 006201.TWO (元大富櫃50)
         df = yf.download(["0050.TW", "006201.TWO"], start=start_date.strftime('%Y-%m-%d'), end=(target_date + timedelta(days=1)).strftime('%Y-%m-%d'), progress=False, auto_adjust=True)
         if df.empty:
-            return {}
-        df_close = df['Close']
-        
+            raise RuntimeError("Downloaded empty DataFrame.")
+            
+        # 兼容 yfinance 多層索引與單層索引收盤價提取
+        if 'Close' in df.columns:
+            df_close = df['Close']
+        elif 'Close' in df.columns.levels[0] if isinstance(df.columns, pd.MultiIndex) else False:
+            df_close = df['Close']
+        else:
+            df_close = df
+            
         # 0050 趨勢
-        p_0050 = df_close['0050.TW'].dropna()
+        if '0050.TW' in df_close.columns:
+            p_0050 = df_close['0050.TW'].ffill().dropna()
+        else:
+            p_0050 = pd.Series()
+            
         p_50 = p_0050.iloc[-1] if not p_0050.empty else np.nan
         m50_50 = p_0050.rolling(50).mean().iloc[-1] if len(p_0050) >= 50 else np.nan
         
         # 006201 趨勢
-        p_two_series = df_close['006201.TWO'].dropna() if '006201.TWO' in df_close.columns else pd.Series()
+        if '006201.TWO' in df_close.columns:
+            p_two_series = df_close['006201.TWO'].ffill().dropna()
+        else:
+            p_two_series = pd.Series()
+            
         p_two = p_two_series.iloc[-1] if not p_two_series.empty else np.nan
         m50_two = p_two_series.rolling(50).mean().iloc[-1] if len(p_two_series) >= 50 else np.nan
         
+        # 若任何一個指標讀取失敗或為空，拋出異常阻止快取錯誤值
+        if pd.isna(p_50) or pd.isna(m50_50) or pd.isna(p_two) or pd.isna(m50_two):
+            raise RuntimeError("Index data contains NaN, preventing caching.")
+            
         return {
             "price_0050": p_50,
             "ma50_0050": m50_50,
@@ -56,8 +75,9 @@ def fetch_market_indices(backtest_date_str):
             "ma50_two": m50_two,
             "date_now": p_0050.index[-1].strftime('%Y-%m-%d') if not p_0050.empty else target_date.strftime('%Y-%m-%d')
         }
-    except Exception:
-        return {}
+    except Exception as e:
+        # 拋出異常以阻止 Streamlit 快取失敗值
+        raise RuntimeError(f"Failed to fetch market indices: {e}")
 
 
 # 2. 自動載入與動態初始化後台字典 (相容 UTF-8-sig)
@@ -966,7 +986,11 @@ else:
 # 轉換為日期字串以利於快取鍵值
 target_date_str = target_date_val.strftime('%Y-%m-%d') if hasattr(target_date_val, 'strftime') else str(target_date_val)
 
-info_indices = fetch_market_indices(target_date_str)
+try:
+    info_indices = fetch_market_indices(target_date_str)
+except Exception:
+    info_indices = {}
+
 if info_indices:
     p_50 = info_indices["price_0050"]
     m50_50 = info_indices["ma50_0050"]
@@ -1041,9 +1065,9 @@ with st.sidebar.form("sepa_integrated_form"):
     st.header("⚙️ 雙軌指標參數設定")
 
     default_pool = (
-        "2337.TW,旺宏\n8016.TW,矽創\n2449.TW,京元電子\n6187.TWO,萬潤\n3037.TW,欣興\n3017.TW,奇鋐\n"
+        "2337.TW,旺宏\n8016.TW,矽創\n3550.TW,聯穎\n6187.TWO,萬潤\n3037.TW,欣興\n3017.TW,奇鋐\n"
         "2478.TW,大毅\n4749.TWO,新應材\n3680.TWO,家登\n8021.TW,尖點\n3481.TW,群創\n"
-        "8438.TW,昶昕\n3033.TW,威健\n2423.TW,固緯\n8147.TWO,正淩\n8028.TW,昇陽半導體\n2428.TW,興勤\n5284.TW,JPP-KY\n"
+        "8438.TW,昶昕\n3033.TW,威健\n2423.TW,固緯\n8147.TWO,正淩\n8028.TW,昇陽半導體\n6716.TWO,應廣\n2428.TW,興勤\n5284.TW,JPP-KY\n"
         "2493.TW,揚博\n3023.TW,信邦\n6672.TW,騰輝電子\n3044.TW,健鼎\n3022.TW,威強電\n3577.TWO,泓格\n3305.TW,昇貿"
     )
     stock_input = st.text_area("股票清單 (支援複製貼上！系統會自動過濾國籍、財報等非代號雜訊)", value=default_pool, height=300)
