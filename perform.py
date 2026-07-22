@@ -103,25 +103,55 @@ def load_stock_dict():
     # 若檔案不存在、為空或已過期，自動自官方 API 抓取並覆蓋
     if not file_exists or os.path.getsize(file_path) == 0 or is_outdated:
         try:
+            headers = {'User-Agent': 'Mozilla/5.0'}
             # 1. 獲取上市公司 (TWSE)
             url_twse = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
-            r_twse = requests.get(url_twse, timeout=10)
+            r_twse = requests.get(url_twse, headers=headers, verify=False, timeout=10)
             if r_twse.status_code == 200:
                 for item in r_twse.json():
                     code = item.get("Code", "").strip()
                     name = item.get("Name", "").strip()
-                    if code and name and code.isdigit() and len(code) == 4:
-                        stock_dict[f"{code}.TW"] = name
+                    if code and name and len(code) <= 6:
+                        if not (len(code) == 6 and (code.startswith('03') or code.startswith('04') or code.startswith('05') or code.startswith('06') or code.startswith('07') or code.startswith('08') or code.startswith('7'))):
+                            stock_dict[f"{code}.TW"] = name
 
             # 2. 獲取上櫃公司 (TPEx)
             url_tpex = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
-            r_tpex = requests.get(url_tpex, timeout=10)
+            r_tpex = requests.get(url_tpex, headers=headers, verify=False, timeout=10)
             if r_tpex.status_code == 200:
                 for item in r_tpex.json():
                     code = item.get("SecuritiesCompanyCode", "").strip()
                     name = item.get("CompanyName", "").strip()
-                    if code and name and code.isdigit() and len(code) == 4:
-                        stock_dict[f"{code}.TWO"] = name
+                    if code and name and len(code) <= 6:
+                        if not (len(code) == 6 and (code.startswith('7') or code.startswith('03') or code.startswith('04') or code.startswith('05') or code.startswith('06') or code.startswith('07') or code.startswith('08'))):
+                            stock_dict[f"{code}.TWO"] = name
+
+            # 3. 補充抓取 ISIN 官方目錄（確保包含創新板、特別股、ETF與全市場無遺漏）
+            for mode, suffix in [('2', '.TW'), ('4', '.TWO')]:
+                url = f"https://isin.twse.com.tw/isin/C_public.jsp?strMode={mode}"
+                try:
+                    res = requests.get(url, headers=headers, verify=False, timeout=12)
+                    if res.status_code == 200:
+                        soup = BeautifulSoup(res.text, 'html.parser')
+                        current_cat = ''
+                        for r in soup.find_all('tr'):
+                            tds = r.find_all('td')
+                            if len(tds) == 1:
+                                current_cat = tds[0].text.strip()
+                            elif len(tds) >= 6:
+                                if '權證' in current_cat or '認購' in current_cat or '認售' in current_cat or '牛熊證' in current_cat:
+                                    continue
+                                code_name = tds[0].text.strip()
+                                if '　' in code_name:
+                                    code, name = code_name.split('　', 1)
+                                    code = code.strip()
+                                    name = name.strip()
+                                    if code and name and len(code) <= 6:
+                                        key = f"{code}{suffix}"
+                                        if key not in stock_dict:
+                                            stock_dict[key] = name
+                except Exception:
+                    pass
 
             # 寫入 stocks_list.txt
             if stock_dict:
@@ -1065,9 +1095,9 @@ with st.sidebar.form("sepa_integrated_form"):
     st.header("⚙️ 雙軌指標參數設定")
 
     default_pool = (
-        "2337.TW,旺宏\n8016.TW,矽創\n6187.TWO,萬潤\n3037.TW,欣興\n3017.TW,奇鋐\n"
+        "2337.TW,旺宏\n8016.TW,矽創\n3550.TW,聯穎\n6187.TWO,萬潤\n3037.TW,欣興\n3017.TW,奇鋐\n"
         "2478.TW,大毅\n4749.TWO,新應材\n3680.TWO,家登\n8021.TW,尖點\n3481.TW,群創\n"
-        "8438.TW,昶昕\n3033.TW,威健\n2423.TW,固緯\n8147.TWO,正淩\n8028.TW,昇陽半導體\n2449.TW,京元電子\n2428.TW,興勤\n5284.TW,JPP-KY\n"
+        "8438.TW,昶昕\n3033.TW,威健\n2423.TW,固緯\n8147.TWO,正淩\n8028.TW,昇陽半導體\n6716.TWO,應廣\n2428.TW,興勤\n5284.TW,JPP-KY\n"
         "2493.TW,揚博\n3023.TW,信邦\n6672.TW,騰輝電子\n3044.TW,健鼎\n3022.TW,威強電\n3577.TWO,泓格\n3305.TW,昇貿"
     )
     stock_input = st.text_area("股票清單 (支援複製貼上！系統會自動過濾國籍、財報等非代號雜訊)", value=default_pool, height=300)
